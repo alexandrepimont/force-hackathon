@@ -74,7 +74,22 @@ in GDA94 / MGA zone 51, so they load with `avo.segy_io.read_cube`.
   found automatically; Ricker wavelets and one global scale per stack come from training wells only (Poseidon-2
   and Boreas-1 held out). Polarity (reverse) and angle ranges (6-18, 18-30, 30-42 deg) are from the CGGVeritas
   processing report.
-- **Dashboard:** the *Well QC & tie* tab shows, per well, what the automated tie changed (time-depth source,
-  shift, stretch, correlation before/after per stack, time-depth curves) and the QC plot and provenance. The
-  *Seismic* tab has *Well to well* lines (synthetics and tops at the wells), inline/crossline/time-slice views and a
-  3D view, each with a 2D map showing where the line is.
+- **Dashboard:** step-by-step pages (1 Data, 2 Well logs, 3 Well QC, 4 Seismic, 5 Well tie, 6 Seismic through
+  wells, 7 Rock physics, 8 AVO classification, 9 Prospect simulation) with back/next links. Step 5 shows per well
+  what the automated tie changed and a line through the well with the tie on/off; every seismic view has a 2D map
+  showing where the line is. The previous tabbed explorer is kept in `dashboard/legacy_explorer.py`.
+
+## Prospect simulation: 1D pseudo-well at a location (step 9 in the app)
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --well Poseidon-2                          # blind test
+.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --il 3180 --xl 2337 --t0 3044 --t1 3292    # any location
+```
+
+Pick a location (map) and a TWT window (top and base on the section) in step 9 of the app, or use the script.
+Thousands of pseudo-wells are simulated from the training wells (facies Markov chain and layer thicknesses,
+correlated porosity / Vsh / Vp / Vs / density / GR per facies with depth trends, gas or brine via Gassmann),
+forward-modelled to near/mid/far with the tie wavelets and scales, and weighted against the observed traces at
+the location. Output: facies probabilities, P10/P50/P90 logs, P(gas | sand) and the expected vs observed AVO
+response (`outputs/simulation/<name>.npz/.json`; `<name>_blind.csv` with scores for wells). Settings and all
+assumptions are in `configs/prospect_sim.yaml`; held-out wells are never used.

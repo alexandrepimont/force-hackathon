@@ -120,35 +120,24 @@ Order matters: QC writes `data/interim/poseidon_logs/`, the tie reads it and wri
 
 ### 5.1 Structure
 
-- Streamlit, Plotly. Top-level script; the sidebar picks the **data folder** (default
-  `data/poseidon/dashboard`, falls back to `data/synthetic_reservoir`), the **well**, depth reference
-  (MD / TVDSS) and depth window. `well_id` is the global "selected well" used by all tabs.
-- Tabs: **Well logs** (tracks with tops), **Field overview** (well map coloured by a surface depth, tops
-  correlation), **Rock-property crossplots** (incl. AI vs Vp/Vs, per well or all wells, formation filter),
-  **Seismic** (`render_seismic_viewer`), **Well QC & tie** (`render_well_qc_tie`), **Data preview**.
-  With the synthetic folder the second tab becomes the synthetic reservoir model and the seismic tab shows the
-  synthetic angle gather.
-- `render_seismic_viewer` is decorated with `@st.fragment`, so moving sliders only reruns that function (whole
-  script reruns took ~5 s). Views:
-  - **Well to well** (`render_traverse`): ordered multiselect of wells -> straight segments between their
-    IL/XL positions (`traverse_indices`, one sample per trace step) -> traces read by fancy indexing
-    (`read_seismic_traces`). Overlays: vertical well lines, yellow synthetic wiggles from the tie
-    (`syn_after * scale`, same colour clip as the seismic), tops in tied time joined between wells.
-    near / mid / far can be stacked vertically.
-  - **Inline / Crossline / Time slice**: Plotly heatmaps, decimated to <= ~900 columns, `RdBu_r`, symmetric
-    clip from a percentile of the first panel (same clip for all panels so near/mid/far brightness is comparable).
-    Wells within N lines are drawn.
-  - **3D** (`render_3d`): Plotly `go.Surface` for one inline, one crossline and one time slice (decimated to
-    ~200 x 160), coordinates in metres **relative to the cube centre** (avoids float jitter), z = -TWT, a
-    vertical-scale slider (aspect ratio), wells as vertical lines, tops as white dots. This is the "quick
-    fallback" from the team's 3D notes; a three.js component (textured quads, click-to-move) is the upgrade path.
-  - Every view has a **2D basemap** (`basemap`): survey outline (4 cube corners), wells, and the displayed line(s)
-    in red; time slices shade the whole outline.
-- `render_well_qc_tie` sub-tabs: **Well tie: what changed** (metrics: TD source + distance, shift, stretch,
-  mean r with delta, training/held-out; QC flag banner; interactive tracks AI, Vp/Vs, and per stack seismic vs
-  synthetic before (dashed grey) vs after (coloured) with tops; time-depth before/after and difference;
-  wavelets; raw JSON with rejected donors), **Well QC** (QC PNG, summary row, curve provenance table),
-  **All wells and gate G2** (tie summary, global calibration, QC summary, decision log).
+- Streamlit multipage app built with `st.navigation` / `st.Page` (one function per page, `PAGES` dict at the end
+  of `dashboard/app.py`). Light theme in `.streamlit/config.toml`. The old tabbed explorer (incl. the synthetic
+  dataset) is kept as `dashboard/legacy_explorer.py`.
+- Pages (`ORDER` list): Overview, **1 Data**, **2 Well logs**, **3 Well QC**, **4 Seismic**, **5 Well tie**,
+  **6 Seismic through wells**, **7 Rock physics**, **8 AVO classification** (what comes next), **9 Prospect
+  simulation**. Every page starts with `step_header` (purpose + "What to look for") and has **Back / Next**
+  links at the top and bottom (`step_nav`). The selected well is shared through `st.session_state["well"]`.
+  The sidebar shows progress (`step_status`).
+- Step 4 (`page_seismic`, an `@st.fragment`): Inline / Crossline / Time slice / 3D, one stack or all three on
+  one colour scale, with a 2D basemap (`basemap`) that shows where the line is.
+- Step 5 (`page_tie`): per-well tie result and `tie_line_view` - an inline, crossline or well-to-well line
+  through the well with the tie **Off / On / Before | after**, so you can see what the automated tie changed.
+- Step 6 (`page_traverse`): ordered well-to-well line (`traverse_indices`, `read_seismic_traces`) with the tie
+  synthetics and tops at the wells.
+- Step 9 (`page_simulation`): see section 7b.
+- Plotting: use `go.Scatter`, **not** `go.Scattergl` (WebGL traces did not render in the test browser).
+- Test hook: environment variable `POSEIDON_APP_PAGE=<key>` renders a single page directly (used with
+  `streamlit.testing.v1.AppTest`).
 
 ### 5.2 Why the seismic is fast: the display cache
 
@@ -168,7 +157,7 @@ back. `seismic_cache_ready` checks the source mtime. Any section now reads in ~0
 **Important:** Streamlit reloads `app.py` on change but **not** imported modules such as
 `src/dashboard_data.py` - after editing those, stop the server process and start it again, otherwise you get
 ImportError / stale behaviour. Test headlessly with `streamlit.testing.v1.AppTest` (all views were tested this
-way; radio keys: `seis_view`, `seis_stack_False`, multiselect `seis_traverse`).
+way; widget keys: `seis_view`, `seis_stack`, `trav_stack`, `trav_wells`, `tl_line_<well>`, `tl_mode_<well>`, `sim_il`, `sim_xl`, `sim_t0`, `sim_t1`, `sim_method`, `sim_run`).
 
 ---
 
@@ -234,6 +223,57 @@ from resistivity alone. Implementation:
 
 Held-out wells (**Poseidon-2, Boreas-1**, set in `configs/petrophysics.yaml: held_out_wells`) are tied (shift
 only, so they can be evaluated later) but excluded from Vs calibration, wavelets, scales and noise.
+
+---
+
+## 7b. Prospect simulation (step 9) - `src/avo/prospect_sim.py`, `scripts/run_prospect_sim.py`, `configs/prospect_sim.yaml`
+
+Goal: at any location and over a short TWT window, predict what a well would find - facies, porosity, Vsh, Sw,
+Vp, Vs, density, AI, Vp/Vs and gas - with uncertainty, based on the rock physics of the other wells **and** the
+observed near/mid/far AVO signal at that location.
+
+1. **Prior from the training wells** (`build_prior`; held-out Poseidon-2 and Boreas-1 are never read):
+   logs below 3500 m TVDSS are blocked to 1 m; gas-indicated sands are Gassmann-substituted to brine (Archie Sw);
+   facies runs give a layer-to-layer **Markov transition matrix** and **thickness distributions**; per facies a
+   Gaussian of (phi, Vsh, Vp, Vs, rho, GR) of **layer means** with a linear depth trend. Neighbouring layers are
+   correlated: a per-pseudo-well offset (between-well share of the variance, estimated: 0.34) plus an AR(1)
+   layer component whose correlation is **calibrated so that prior synthetics have the same RMS amplitude as the
+   training wells' own log synthetics** (`calibrate_ar1`, result 0.95; no seismic, no blind wells involved).
+2. **Fluid scenario:** with probability 0.5 a gas column with a contact drawn in/below the window; gas sands get
+   Sw from the gas-indicated training sands and are substituted with Batzle-Wang gas (P/T from documented
+   gradient assumptions). Gassmann's dry modulus is floored at 0.6 x K_sat to avoid absurd fluid effects from
+   inconsistent draws. At ~4.5-5 km in these stiff sands gas changes Vp by only ~1-2 % - the seismic hardly
+   separates gas from brine (also true for the real well logs).
+3. **Forward model:** time-domain layers on a 1 ms grid -> Aki-Richards averaged over 5 angles per stack
+   (6-18, 18-30, 30-42 deg) -> tie wavelets -> 4 ms; reverse polarity; one global scale per stack and the tie
+   residual as noise.
+4. **Posterior** (`method` in the config):
+   - `localised_is` (default): importance weights per output sample using the misfit within +/-32 ms (about one
+     wavelet), log-likelihood divided by the correlation length (~26 ms / 4 ms). **Adaptive tempering** (beta <= 1)
+     softens the likelihood only when fewer than 200 effective pseudo-wells would remain; beta < 0.5 means the
+     wells cannot reproduce the amplitudes there and the app shows a warning. Statistics are accumulated as
+     weighted histograms in two passes (same seeds), so memory stays small. 20,000 pseudo-wells ~45 s.
+   - `smc`: sequential Monte Carlo (particle filter) - grow pseudo-wells top-down in 32 ms segments, weight on
+     the new segment, resample, cut and regrow below. Matches the seismic more closely but explains weak
+     amplitudes with stiffer, more uniform rock (Vp bias), so it is an option only.
+   The method was chosen on **training** wells (Kronos-1, Poseidon-1, Proteus-1): localised IS gave the best
+   porosity, Vp and facies scores.
+5. **Outputs** (`save_result`): `outputs/simulation/<name>.npz` (prior and posterior facies probabilities,
+   P10/P50/P90 for every log, P(gas), synthetic quantiles, observed trace, 20-30 example pseudo-wells) and
+   `<name>.json` (location, window, time-depth donor, ESS, beta, P(gas column), full config). `prior.json` holds
+   the prior summary. Simulated data are always labelled as simulated.
+
+**Blind test** (`--well Poseidon-2`, `--well Boreas-1`, scores in `<name>_blind.csv`; prior -> posterior):
+probability of the true facies 0.58 -> 0.76 and 0.52 -> 0.61; Vp MAE 274 -> 177 and 302 -> 232 m/s; Vs MAE
+227 -> 143 and 243 -> 189 m/s; porosity MAE slightly worse (0.023 -> 0.028, 0.037 -> 0.044) but still inside
+P10-P90 for 98 % / 91 % of the samples. Gas: no useful discrimination (see point 2).
+
+**App (step 9):** click the map to move the pseudo-well (or "Jump to a well" / IL-XL inputs), click top and base
+anywhere on the section (an invisible clickable grid lies over the heatmap, because Plotly heatmaps do not emit
+selection events; the section uses `dragmode="pan"` - in select mode single clicks were not registered), choose
+the method and number of pseudo-wells, run (progress bar), and inspect the tabs *Pseudo-well logs* (actual logs
+overlaid when the location is at a well), *AVO signal* (observed vs prior/posterior synthetics, the best-matching
+pseudo-well, AVO curve at a chosen time) and *Example pseudo-wells*.
 
 ---
 
