@@ -7,11 +7,14 @@ batch_size: 2000
 seed: 7
 pad_ms: 64                     # modelled above/below the window so the wavelet sees the boundaries (not scored)
 
-# Posterior method:
+# Posterior method (chosen on TRAINING wells Kronos-1, Poseidon-1, Proteus-1; blind wells not used):
+#   localised_is - importance weighting with a +/- localisation window (default). Best facies and log scores:
+#                  porosity MAE 0.034 (prior 0.039), Vp MAE 393 m/s (prior 470), P(true facies) 0.48 (prior 0.44)
 #   smc          - sequential Monte Carlo (particle filter): pseudo-wells are grown top-down in segments, weighted
-#                  on the seismic misfit of each new segment, resampled and regrown below (default)
-#   localised_is - one-shot importance weighting with a +/- localisation window (fast, but weakly conditioned)
-method: smc
+#                  on the seismic misfit of each new segment, resampled and regrown below. Closer match to the
+#                  seismic (~80 % of samples inside P10-P90 vs ~67 %) but worse logs/facies (it explains weak
+#                  amplitudes with stiffer, more uniform rock), so it is offered as an alternative only.
+method: localised_is
 smc:
   n_particles: 5000
   segment_ms: 32               # scored segment length

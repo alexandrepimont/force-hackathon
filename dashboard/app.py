@@ -1293,12 +1293,12 @@ def sim_section_fig(ready, geometry, pos, il, xl, kind, stack, t0, t1, picks):
     return fig
 
 
-def _run_simulation_ui(il, xl, t0, t1, n):
+def _run_simulation_ui(il, xl, t0, t1, n, method="localised_is"):
     from avo import prospect_sim as ps
     bar = st.progress(0.0, text="Preparing prior from the training wells...")
     try:
         prior = sim_prior()
-        meta = ps.run_at_location(ROOT, il, xl, t0, t1, n=n, prior=prior,
+        meta = ps.run_at_location(ROOT, il, xl, t0, t1, n=n, prior=prior, overrides={"method": method},
                                   progress=lambda f, msg: bar.progress(min(f, 1.0), text=f"{msg} ({f:.0%})"))
     except ValueError as exc:
         bar.empty()
@@ -1396,6 +1396,10 @@ def sim_avo_figure(r, meta):
                                  name="Posterior P50", showlegend=k == 1), 1, k)
         fig.add_trace(go.Scatter(x=r["obs_norm"][k - 1], y=t, mode="lines", line={"color": "black", "width": 2},
                                  name="Observed (calibrated)", showlegend=k == 1), 1, k)
+        if "ex_best_syn" in r:
+            fig.add_trace(go.Scatter(x=r["ex_best_syn"][0, k - 1], y=t, mode="lines",
+                                     line={"color": RED, "width": 1.5, "dash": "dot"},
+                                     name="Best-matching pseudo-well", showlegend=k == 1), 1, k)
         fig.add_hrect(y0=t0, y1=t1, fillcolor="rgba(255,211,61,0.12)", line_width=0, row=1, col=k)
     fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=1, col=1)
     style(fig, 560)
@@ -1537,15 +1541,22 @@ def page_simulation():
                    if near in held else " – a training well, so this is not an independent test."))
 
     st.subheader("Run")
-    r1 = st.columns([1.4, 1, 3])
-    n = r1[0].select_slider("Number of pseudo-wells", [2000, 5000, 10000], value=5000, key="sim_n",
-                            help="Particles in the sequential Monte Carlo. A plain Monte Carlo prior of the same "
-                                 "size (at least 5,000) is run alongside for comparison.")
+    r1 = st.columns([1.3, 1.4, 1, 2.3])
+    method = r1[0].segmented_control(
+        "Method", ["Localised weighting", "Sequential (SMC)"], default="Localised weighting", key="sim_method",
+        help="Localised weighting (recommended): best facies and log predictions in tests on training wells. "
+             "Sequential Monte Carlo: pseudo-wells match the seismic more closely, but tend to explain weak "
+             "amplitudes with stiffer, more uniform rock.") or "Localised weighting"
+    smc = method.startswith("Sequential")
+    options = [2000, 5000, 10000] if smc else [5000, 10000, 20000, 40000]
+    n = r1[1].select_slider("Number of pseudo-wells", options, value=5000 if smc else 20000,
+                            key=f"sim_n_{'smc' if smc else 'is'}")
     win_s = max(float(t1) - float(t0), 20.0) / 1000
-    r1[2].caption(f"About {max(15, int(n / 5000 * (25 + 120 * win_s)))} s. The run is saved as soon as it finishes "
-                  "(outputs/simulation/) and can be reopened below.")
+    secs = n / 5000 * (25 + 120 * win_s) if smc else n / 20000 * 45
+    r1[3].caption(f"About {max(15, int(secs))} s (plus ~15 s the first time, to build the prior). The run is saved "
+                  "as soon as it finishes (outputs/simulation/) and can be reopened below.")
     if r1[1].button("Run simulation", type="primary", disabled=not valid, key="sim_run"):
-        meta = _run_simulation_ui(int(il), int(xl), float(t0), float(t1), int(n))
+        meta = _run_simulation_ui(int(il), int(xl), float(t0), float(t1), int(n), "smc" if smc else "localised_is")
         if meta:
             st.success(f"Saved **{meta['name']}** ({meta['runtime_s']} s).")
 
@@ -1582,7 +1593,8 @@ def page_simulation():
         st.warning("The amplitudes here are outside what the training wells can produce (seismic weight "
                    f"{meta['adaptive_beta']:.2f}). The result leans on the wells more than on the seismic – treat it "
                    "as a weakly conditioned estimate.")
-    st.caption("SIMULATED pseudo-well – not measured data. Blind wells "
+    method_label = {"smc": "sequential Monte Carlo"}.get(meta.get("method"), "localised importance weighting")
+    st.caption(f"SIMULATED pseudo-well – not measured data. Method: {method_label}. Blind wells "
                f"({', '.join(meta.get('held_out_wells_excluded', []))}) are never used.")
 
     actual = None
@@ -1612,7 +1624,8 @@ def page_simulation():
         b.markdown("**How to read this**\n\n"
                    "- Black diamonds: observed near/mid/far amplitude at the chosen time.\n"
                    "- Grey: what the wells alone predict here (prior).\n"
-                   "- Blue: pseudo-wells that match the seismic (posterior).\n\n"
+                   "- Blue: pseudo-wells that match the seismic (posterior).\n"
+                   "- Red dotted (traces): the single pseudo-well that matches the whole window best.\n\n"
                    "Amplitudes are in calibrated synthetic units (seismic divided by the global scale from step 5); "
                    "reverse polarity is applied, so a trough is an increase in impedance.")
     with tab3:
