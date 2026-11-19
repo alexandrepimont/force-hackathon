@@ -22,6 +22,8 @@ from plotly.subplots import make_subplots
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 from src.dashboard_data import (  # noqa: E402
     build_seismic_cache,
@@ -198,6 +200,7 @@ def step_status() -> dict[str, str]:
         "traverse": tie_state if tie_state != "todo" else ("done" if cache_ok else "todo"),
         "rockphysics": "done" if qc_ok else "todo",
         "next": "todo",
+        "sim": "done" if sim_runs() else "todo",
     }
 
 
@@ -225,10 +228,11 @@ def well_picker(options: list[str], key: str, label: str = "Well") -> str:
     return choice
 
 
-ORDER = ["overview", "data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next"]
+ORDER = ["overview", "data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next", "sim"]
 NAV_LABELS = {"overview": "Overview", "data": "1 Data", "logs": "2 Well logs", "qc": "3 Well QC",
               "seismic": "4 Seismic", "tie": "5 Well tie", "traverse": "6 Seismic through wells",
-              "rockphysics": "7 Rock physics", "next": "8 AVO classification"}
+              "rockphysics": "7 Rock physics", "next": "8 AVO classification",
+              "sim": "9 Prospect simulation"}
 
 
 def step_nav(current: str, top: bool = False):
@@ -1128,6 +1132,493 @@ def page_next():
     step_nav("next")
 
 
+# ----------------------------------------------------------------------------------------------- step 9
+SIM_DIR = ROOT / "outputs" / "simulation"
+SIM_FACIES = ["shale", "tight", "volcanic", "sand_low_phi", "sand_high_phi"]
+SIM_TRACKS = [("phi", "Porosity (v/v)"), ("vsh", "Vsh (v/v)"), ("sw", "Sw (sands)"), ("vp", "Vp (m/s)"),
+              ("vs", "Vs (m/s)"), ("rho", "Density (g/cc)"), ("ai", "AI"), ("vpvs", "Vp/Vs")]
+
+
+@st.cache_resource(show_spinner=False)
+def _sim_prior(cfg_mtime: int, logs_mtime: int, tie_mtime: int):
+    from avo import prospect_sim as ps
+    del cfg_mtime, logs_mtime, tie_mtime
+    cfg, calib, petro = ps.load_configs(ROOT)
+    return ps.prepare_prior(ROOT, cfg, calib, petro["held_out_wells"])
+
+
+def sim_prior():
+    logs_m = max((_mtime(p) for p in QC_LOGS.glob("*.parquet")), default=0)
+    return _sim_prior(_mtime(ROOT / "configs" / "prospect_sim.yaml"), logs_m, _mtime(CAL_PATH))
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _sim_result(path: str, mtime: int):
+    del mtime
+    d = np.load(path)
+    return {k: d[k] for k in d.files}
+
+
+def sim_runs() -> list[Path]:
+    if not SIM_DIR.is_dir():
+        return []
+    runs = [p for p in SIM_DIR.glob("*.json") if p.stem != "prior" and p.with_suffix(".npz").is_file()]
+    return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+@st.cache_data(show_spinner=False)
+def _trace_at(il: int, xl: int, mtime: int):
+    from avo.welltie import well_traces
+    del mtime
+    cache = ROOT / "data" / "poseidon" / "seismic" / "cache"
+    return well_traces(cache, ["near", "mid", "far"], il, xl, 3)
+
+
+def _selection_points(key):
+    ev = st.session_state.get(key)
+    try:
+        return list(ev["selection"]["points"]) if ev else []
+    except (KeyError, TypeError):
+        return []
+
+
+def _consume_map_click(geometry):
+    pts = _selection_points("sim_map")
+    sig = tuple((round(p.get("x", 0)), round(p.get("y", 0))) for p in pts)
+    if not pts or sig == st.session_state.get("sim_map_sig"):
+        return
+    st.session_state["sim_map_sig"] = sig
+    x, y = pts[-1]["x"], pts[-1]["y"]
+    d = (geometry["cdp_x"] - x) ** 2 + (geometry["cdp_y"] - y) ** 2
+    i, j = np.unravel_index(np.argmin(d), d.shape)
+    st.session_state["sim_il"] = int(geometry["ilines"][i])
+    st.session_state["sim_xl"] = int(geometry["xlines"][j])
+    st.session_state["sim_picks"] = []
+
+
+def _consume_section_click():
+    pts = _selection_points("sim_sec")
+    ys = sorted({min(max(round(float(p["y"]) / 4) * 4, 2700.0), 3900.0) for p in pts if p.get("y") is not None})
+    sig = tuple(ys)
+    if not ys or sig == st.session_state.get("sim_sec_sig"):
+        return
+    st.session_state["sim_sec_sig"] = sig
+    if len(ys) >= 2:
+        st.session_state["sim_t0"], st.session_state["sim_t1"] = float(ys[0]), float(ys[-1])
+        st.session_state["sim_picks"] = []
+        return
+    picks = (st.session_state.get("sim_picks") or []) + [float(ys[0])]
+    if len(picks) >= 2:
+        t0, t1 = sorted(picks[-2:])
+        if t1 - t0 >= 20:
+            st.session_state["sim_t0"], st.session_state["sim_t1"] = t0, t1
+        picks = []
+    st.session_state["sim_picks"] = picks
+
+
+def sim_location_map(geometry, pos, il, xl, kind):
+    ox, oy = survey_outline(geometry)
+    step = 24
+    gx, gy = geometry["cdp_x"][::step, ::step].ravel(), geometry["cdp_y"][::step, ::step].ravel()
+    ii, jj = np.meshgrid(geometry["ilines"][::step], geometry["xlines"][::step], indexing="ij")
+    fig = go.Figure(go.Scatter(x=ox, y=oy, mode="lines", fill="toself", fillcolor="rgba(31,111,235,0.06)",
+                               line={"color": BLUE, "width": 1.5}, hoverinfo="skip", name="Seismic area"))
+    fig.add_trace(go.Scatter(x=gx, y=gy, mode="markers", name="click to pick",
+                             marker={"size": 9, "color": "rgba(31,111,235,0.07)"},
+                             customdata=np.c_[ii.ravel(), jj.ravel()],
+                             hovertemplate="IL %{customdata[0]} / XL %{customdata[1]}<extra>click to pick</extra>"))
+    i, j = int(np.searchsorted(geometry["ilines"], il)), int(np.searchsorted(geometry["xlines"], xl))
+    lx, ly = ((geometry["cdp_x"][i, :], geometry["cdp_y"][i, :]) if kind == "Inline"
+              else (geometry["cdp_x"][:, j], geometry["cdp_y"][:, j]))
+    fig.add_trace(go.Scatter(x=lx, y=ly, mode="lines", line={"color": RED, "width": 3}, hoverinfo="skip",
+                             name=f"{kind} section"))
+    fig.add_trace(go.Scatter(x=pos["X_M"], y=pos["Y_M"], mode="markers+text", text=pos["WELL_ID"],
+                             textposition="top center", textfont={"size": 10}, name="Wells",
+                             marker={"size": 9, "color": "#24292f"}, hovertemplate="%{text}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=[geometry["cdp_x"][i, j]], y=[geometry["cdp_y"][i, j]], mode="markers",
+                             marker={"symbol": "star", "size": 20, "color": "#ffd33d",
+                                     "line": {"color": "black", "width": 1.5}},
+                             name="Pseudo-well", hovertemplate=f"Pseudo-well IL {il} / XL {xl}<extra></extra>"))
+    pad = 1500
+    fig.update_xaxes(range=[ox.min() - pad, ox.max() + pad], showticklabels=False)
+    fig.update_yaxes(range=[oy.min() - pad, oy.max() + pad], showticklabels=False, scaleanchor="x")
+    style(fig, 430, legend_below=False, showlegend=False, title={"text": "1 · Click a location", "font": {"size": 13}})
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 40, "b": 10}, clickmode="event+select", dragmode="pan")
+    return fig
+
+
+def sim_section_fig(ready, geometry, pos, il, xl, kind, stack, t0, t1, picks):
+    ilines, xlines, samples = geometry["ilines"], geometry["xlines"], geometry["samples"]
+    value = il if kind == "Inline" else xl
+    sec = section(ready, stack, kind.lower(), value)
+    lateral = xlines if kind == "Inline" else ilines
+    centre = xl if kind == "Inline" else il
+    half = 160
+    lm = (lateral >= centre - half) & (lateral <= centre + half)
+    show = (samples >= min(t0, 3000) - 150) & (samples <= max(t1, 3400) + 150)
+    clip = max(float(np.percentile(np.abs(sec[lm][:, show]), 98)), 1e-6)
+    fig = go.Figure(seismic_heatmap(sec[lm][:, show].T, lateral[lm], samples[show], clip, "RdBu_r", False,
+                                    "%{x}<br>%{y:.0f} ms<extra></extra>"))
+    fig.data[0].hoverinfo = "skip"
+    fig.data[0].hovertemplate = None
+    ts = samples[show]
+    # invisible, clickable grid over the whole section: a click anywhere returns its time (heatmaps are not
+    # selectable in plotly, so they cannot deliver click events themselves)
+    gx, gy = np.meshgrid(lateral[lm][::8], ts[::2])
+    fig.add_trace(go.Scatter(x=gx.ravel(), y=gy.ravel(), mode="markers", name="click grid",
+                             marker={"size": 14, "color": "rgba(0,0,0,0.003)"},
+                             unselected={"marker": {"opacity": 1}}, selected={"marker": {"opacity": 1}},
+                             hovertemplate="%{y:.0f} ms<extra>click: top / base</extra>"))
+    fig.add_shape(type="rect", x0=centre - 6, x1=centre + 6, y0=t0, y1=t1, line={"color": "black", "width": 2},
+                  fillcolor="rgba(255,211,61,0.35)")
+    fig.add_trace(go.Scatter(x=np.full(len(ts), centre), y=ts, mode="markers", name="pseudo-well path",
+                             marker={"size": 10, "color": "rgba(0,0,0,0.18)", "symbol": "line-ew-open"},
+                             unselected={"marker": {"opacity": 1}},
+                             hovertemplate="%{y:.0f} ms<extra>click: top / base</extra>"))
+    for p in picks:
+        fig.add_hline(y=p, line={"color": RED, "width": 2, "dash": "dot"})
+    along = "CROSSLINE" if kind == "Inline" else "INLINE"
+    across = "INLINE" if kind == "Inline" else "CROSSLINE"
+    for _, w in pos[(pos[across] - value).abs() <= 25].iterrows():
+        if abs(w[along] - centre) <= half:
+            fig.add_vline(x=float(w[along]), line={"color": "#24292f", "width": 1})
+            fig.add_annotation(x=float(w[along]), y=1.0, yref="y domain", yanchor="bottom", showarrow=False,
+                               text=w["WELL_ID"], font={"size": 10}, bgcolor="rgba(255,255,255,.85)")
+    fig.update_yaxes(autorange="reversed", title_text="TWT (ms)")
+    fig.update_xaxes(title_text=along.title())
+    style(fig, 470, legend_below=False, showlegend=False,
+          title={"text": f"2 · Click top and base on the pseudo-well path ({kind.lower()} {value}, {stack} stack)",
+                 "font": {"size": 13}})
+    fig.update_layout(clickmode="event+select", dragmode="pan", hovermode="closest", hoverdistance=30)
+    return fig
+
+
+def _run_simulation_ui(il, xl, t0, t1, n):
+    from avo import prospect_sim as ps
+    bar = st.progress(0.0, text="Preparing prior from the training wells...")
+    try:
+        prior = sim_prior()
+        meta = ps.run_at_location(ROOT, il, xl, t0, t1, n=n, prior=prior,
+                                  progress=lambda f, msg: bar.progress(min(f, 1.0), text=f"{msg} ({f:.0%})"))
+    except ValueError as exc:
+        bar.empty()
+        st.error(str(exc))
+        return None
+    bar.empty()
+    st.session_state["sim_selected"] = meta["name"]
+    st.session_state["sim_pick_run"] = meta["name"]
+    return meta
+
+
+def _near_well(pos, il, xl, max_traces=3):
+    p = pos.dropna(subset=["INLINE"])
+    d = np.hypot(p["INLINE"] - il, p["CROSSLINE"] - xl)
+    if len(d) and d.min() <= max_traces:
+        return p.loc[d.idxmin(), "WELL_ID"]
+    return None
+
+
+def _band(fig, row, col, q, t, color, name, show):
+    fig.add_trace(go.Scatter(x=np.r_[q[0], q[2][::-1]], y=np.r_[t, t[::-1]], fill="toself", fillcolor=color,
+                             line={"width": 0}, hoverinfo="skip", name=name, legendgroup=name, showlegend=show),
+                  row, col)
+
+
+def sim_wells_figure(r, meta, actual):
+    t = r["t_model_ms"]
+    t0, t1 = meta["window_twt_ms"]
+    m = (t >= t0 - 8) & (t <= t1 + 8)
+    t = t[m]
+    names = list(r["facies_names"])
+    ncol = 3 + len(SIM_TRACKS)
+    titles = ["Facies (prior)", "Facies (posterior)", "P(gas | sand)"] + [lab for _, lab in SIM_TRACKS]
+    fig = make_subplots(rows=1, cols=ncol, shared_yaxes=True, horizontal_spacing=0.012, subplot_titles=titles)
+    for col, ens in ((1, "prior"), (2, "post")):
+        prob = r[f"{ens}_facies_prob"][:, m]
+        cum = np.zeros(len(t))
+        for fname in SIM_FACIES:
+            k = names.index(fname)
+            fig.add_trace(go.Scatter(x=cum.copy(), y=t, mode="lines", line={"width": 0}, hoverinfo="skip",
+                                     showlegend=False), 1, col)
+            cum = cum + prob[k]
+            fig.add_trace(go.Scatter(x=cum.copy(), y=t, mode="lines", fill="tonextx", line={"width": 0},
+                                     fillcolor=LITHO_COLORS[fname], name=LITHO_LABELS[fname], legendgroup=fname,
+                                     showlegend=col == 2, customdata=prob[k],
+                                     hovertemplate=f"{LITHO_LABELS[fname]}: %{{customdata:.2f}}<br>%{{y:.0f}} ms"
+                                                   "<extra></extra>"), 1, col)
+        fig.update_xaxes(range=[0, 1], row=1, col=col)
+    si = [names.index("sand_high_phi"), names.index("sand_low_phi")]
+    for ens, color, dash in (("prior", GREY, "dot"), ("post", RED, "solid")):
+        psand = r[f"{ens}_facies_prob"][si][:, m].sum(axis=0)
+        pg = np.where(psand > 0.03, r[f"{ens}_p_gas"][m] / np.maximum(psand, 1e-6), np.nan)
+        fig.add_trace(go.Scatter(x=pg, y=t, mode="lines", line={"color": color, "width": 2, "dash": dash},
+                                 name="P(gas | sand) prior" if ens == "prior" else "P(gas | sand) posterior",
+                                 hovertemplate="%{x:.2f}<extra></extra>"), 1, 3)
+    fig.update_xaxes(range=[0, 1], row=1, col=3)
+    for c, (key, _) in enumerate(SIM_TRACKS, start=4):
+        _band(fig, 1, c, r[f"prior_{key}_q"][:, m], t, "rgba(110,119,129,0.18)", "Prior P10–P90", c == 4)
+        _band(fig, 1, c, r[f"post_{key}_q"][:, m], t, "rgba(31,111,235,0.28)", "Posterior P10–P90", c == 4)
+        fig.add_trace(go.Scatter(x=r[f"post_{key}_q"][1, m], y=t, mode="lines", line={"color": BLUE, "width": 2},
+                                 name="Posterior P50", legendgroup="p50", showlegend=c == 4,
+                                 hovertemplate="%{x:.3g}<extra>P50</extra>"), 1, c)
+        if actual is not None and key in actual:
+            fig.add_trace(go.Scatter(x=actual[key], y=actual.index, mode="lines", line={"color": "black", "width": 1.3},
+                                     name=f"Actual log ({meta.get('_actual_well')})", legendgroup="actual",
+                                     showlegend=c == 4, hovertemplate="%{x:.3g}<extra>actual</extra>"), 1, c)
+    if actual is not None:
+        lith = actual["lithotype"].dropna()
+        for fname in SIM_FACIES:
+            sel = lith[lith == fname]
+            if len(sel):
+                fig.add_trace(go.Scatter(x=np.full(len(sel), 1.04), y=sel.index, mode="markers", cliponaxis=False,
+                                         marker={"symbol": "square", "size": 5, "color": LITHO_COLORS[fname]},
+                                         showlegend=False, hoverinfo="skip"), 1, 2)
+    for c in range(1, ncol + 1):
+        fig.add_hline(y=t0, line={"color": "black", "width": 1, "dash": "dash"}, row=1, col=c)
+        fig.add_hline(y=t1, line={"color": "black", "width": 1, "dash": "dash"}, row=1, col=c)
+    fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=1, col=1)
+    fig.update_annotations(font_size=11)
+    style(fig, 760)
+    fig.update_layout(legend={"orientation": "h", "y": -0.07, "x": 0})
+    return fig
+
+
+def sim_avo_figure(r, meta):
+    t = r["t_out_ms"]
+    t0, t1 = meta["window_twt_ms"]
+    stacks = list(r["stacks"])
+    fig = make_subplots(rows=1, cols=len(stacks), shared_yaxes=True, horizontal_spacing=0.03,
+                        subplot_titles=[f"{s} stack" for s in stacks])
+    for k, s in enumerate(stacks, start=1):
+        _band(fig, 1, k, r["prior_syn_q"][:, k - 1], t, "rgba(110,119,129,0.18)", "Prior P10–P90", k == 1)
+        _band(fig, 1, k, r["post_syn_q"][:, k - 1], t, "rgba(31,111,235,0.28)", "Posterior P10–P90", k == 1)
+        fig.add_trace(go.Scatter(x=r["post_syn_q"][1, k - 1], y=t, mode="lines", line={"color": BLUE, "width": 2},
+                                 name="Posterior P50", showlegend=k == 1), 1, k)
+        fig.add_trace(go.Scatter(x=r["obs_norm"][k - 1], y=t, mode="lines", line={"color": "black", "width": 2},
+                                 name="Observed (calibrated)", showlegend=k == 1), 1, k)
+        fig.add_hrect(y0=t0, y1=t1, fillcolor="rgba(255,211,61,0.12)", line_width=0, row=1, col=k)
+    fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=1, col=1)
+    style(fig, 560)
+    return fig
+
+
+def sim_avo_curve(r, meta, t_pick):
+    t = r["t_out_ms"]
+    k = int(np.argmin(np.abs(t - t_pick)))
+    calib = calibration() or {}
+    angles = [0.5 * (v["angle_min"] + v["angle_max"]) for v in calib.get("stacks", {}).values()] or [12, 24, 36]
+    fig = go.Figure()
+    for ens, color, name in (("prior", GREY, "Prior"), ("post", BLUE, "Posterior")):
+        q = r[f"{ens}_syn_q"][:, :, k]
+        fig.add_trace(go.Scatter(x=angles, y=q[1], mode="lines+markers", name=f"{name} P50",
+                                 line={"color": color, "width": 2},
+                                 error_y={"type": "data", "symmetric": False, "array": q[2] - q[1],
+                                          "arrayminus": q[1] - q[0], "color": color, "thickness": 1.5}))
+    fig.add_trace(go.Scatter(x=angles, y=r["obs_norm"][:, k], mode="markers", name="Observed",
+                             marker={"size": 13, "color": "black", "symbol": "diamond"}))
+    fig.add_hline(y=0, line={"color": "#d0d7de"})
+    fig.update_xaxes(title_text="Mean incidence angle of the stack (deg)")
+    fig.update_yaxes(title_text="Amplitude (calibrated synthetic units)")
+    style(fig, 420, title={"text": f"AVO response at {t[k]:.0f} ms", "font": {"size": 13}})
+    return fig
+
+
+def sim_examples_figure(r, meta):
+    t = r["t_model_ms"]
+    t0, t1 = meta["window_twt_ms"]
+    m = (t >= t0) & (t <= t1)
+    names = list(r["facies_names"])
+    order = [names.index(f) for f in SIM_FACIES]
+    remap = np.full(len(names), 0)
+    for new, old in enumerate(order):
+        remap[old] = new
+    fac = r["ex_best_facies"][:20, m].astype(int)
+    z = remap[np.clip(fac, 0, len(names) - 1)].T
+    n = len(SIM_FACIES)
+    scale = []
+    for i, f in enumerate(SIM_FACIES):
+        scale += [[i / n, LITHO_COLORS[f]], [(i + 1) / n, LITHO_COLORS[f]]]
+    fig = go.Figure(go.Heatmap(z=z, x=np.arange(1, z.shape[1] + 1), y=t[m], colorscale=scale, zmin=-0.5,
+                               zmax=n - 0.5, showscale=False,
+                               customdata=np.array([[LITHO_LABELS[SIM_FACIES[v]] for v in row] for row in z]),
+                               hovertemplate="#%{x} %{y:.0f} ms<br>%{customdata}<extra></extra>"))
+    fig.update_yaxes(autorange="reversed", title_text="TWT (ms)")
+    fig.update_xaxes(title_text="Best-matching pseudo-wells (rank)", dtick=1)
+    style(fig, 420, legend_below=False, title={"text": "Example pseudo-wells (facies)", "font": {"size": 13}})
+    return fig
+
+
+def _actual_logs(well, t0, t1):
+    d = qc_logs(well)
+    if d is None or "twt" not in d:
+        return None
+    d = d[(d["twt"] >= t0 - 8) & (d["twt"] <= t1 + 8)].copy()
+    if d.empty:
+        return None
+    d["ai"], d["vpvs"] = d["vp"] * d["rho"], d["vp"] / d["vs"]
+    d.loc[~d["lithotype"].isin(["sand_high_phi", "sand_low_phi"]), "sw"] = np.nan
+    ms = np.round(d["twt"])
+    out = d.groupby(ms)[["phi", "vsh", "sw", "vp", "vs", "rho", "ai", "vpvs"]].mean()
+    out["lithotype"] = d.groupby(ms)["lithotype"].agg(lambda s: s.mode().iat[0] if len(s.mode()) else None)
+    return out
+
+
+def page_simulation():
+    step_header(9, "Prospect simulation (pseudo-well)",
+                "Pick a location and a time window. Thousands of **pseudo-wells** are simulated from the rock "
+                "physics of the training wells (facies sequences, porosity, clay, velocities, density, gas or brine), "
+                "forward-modelled to near/mid/far and weighted by how well they match the **observed AVO signal** "
+                "at that location. The result is the facies and log values that are consistent with both the wells "
+                "and the seismic, with uncertainty.",
+                "where the posterior (blue) is narrower than the prior (grey): there the seismic tells us "
+                "something. Where they overlap, the answer comes from the wells alone.")
+    stacks, ready, geometry, positions = seismic()
+    if not ready or geometry is None:
+        st.warning("The seismic display cache is missing. Build it in step 1.")
+        return
+    if not CAL_PATH.is_file():
+        st.warning("Run the well tie (step 5) first: the simulation uses its wavelets and amplitude scales.")
+        return
+    pos = positions.dropna(subset=["INLINE"])
+    if "X_M" not in pos:
+        pos = pos.merge(wells()[["WELL_ID", "X_M", "Y_M"]], on="WELL_ID", how="left")
+    ilines, xlines = geometry["ilines"], geometry["xlines"]
+
+    # defaults: start at the selected well
+    if "sim_il" not in st.session_state:
+        w = st.session_state.get("well")
+        row = pos[pos["WELL_ID"] == w]
+        row = row.iloc[0] if len(row) else pos.iloc[0]
+        st.session_state["sim_il"], st.session_state["sim_xl"] = int(row["INLINE"]), int(row["CROSSLINE"])
+        st.session_state["sim_t0"], st.session_state["sim_t1"] = 3150.0, 3350.0
+        st.session_state["sim_picks"] = []
+    _consume_map_click(geometry)
+    _consume_section_click()
+
+    st.subheader("Choose the pseudo-well")
+    c = st.columns([1.2, 1, 1, 1, 1])
+    start = c[0].selectbox("Jump to a well", ["(keep current)"] + list(pos["WELL_ID"]), key="sim_jump")
+    if start != "(keep current)" and start != st.session_state.get("sim_jump_done"):
+        row = pos[pos["WELL_ID"] == start].iloc[0]
+        st.session_state["sim_il"], st.session_state["sim_xl"] = int(row["INLINE"]), int(row["CROSSLINE"])
+        meta_tie = tie_meta(start)
+        if meta_tie and meta_tie.get("result", {}).get("window_ms"):
+            st.session_state["sim_t0"], st.session_state["sim_t1"] = map(float, meta_tie["result"]["window_ms"])
+        st.session_state["sim_jump_done"] = start
+        st.rerun()
+    il = c[1].number_input("Inline", int(ilines[0]), int(ilines[-1]), step=1, key="sim_il")
+    xl = c[2].number_input("Crossline", int(xlines[0]), int(xlines[-1]), step=1, key="sim_xl")
+    t0 = c[3].number_input("Window top (ms)", 2700.0, 3900.0, step=4.0, key="sim_t0")
+    t1 = c[4].number_input("Window base (ms)", 2700.0, 3900.0, step=4.0, key="sim_t1")
+    c2 = st.columns([1, 1, 3])
+    kind = c2[0].segmented_control("Section", ["Inline", "Crossline"], default="Inline", key="sim_kind") or "Inline"
+    sstack = c2[1].segmented_control("Stack", ["near", "mid", "far"], default="far", key="sim_stack") or "far"
+    picks = st.session_state.get("sim_picks") or []
+    c2[2].caption("Click anywhere on the map to move the pseudo-well. On the section, click the **top** and then "
+                  "the **base** on the dotted pseudo-well path (or drag a box over it). "
+                  + (f"Top picked at **{picks[0]:.0f} ms** – now click the base." if picks else ""))
+
+    left, right = st.columns([1, 2.2])
+    left.plotly_chart(sim_location_map(geometry, pos, il, xl, kind), width="stretch", key="sim_map",
+                      on_select="rerun", selection_mode="points")
+    right.plotly_chart(sim_section_fig(ready, geometry, pos, il, xl, kind, sstack, t0, t1, picks),
+                       width="stretch", key="sim_sec", on_select="rerun", selection_mode=("points", "box"))
+
+    valid = t1 - t0 >= 20
+    if not valid:
+        st.error("The window must be at least 20 ms thick (top above base).")
+    elif t1 - t0 > 600:
+        st.warning("Windows longer than 600 ms are slow and mix very different depths; consider a shorter one.")
+    near = _near_well(pos, il, xl)
+    held = set((calibration() or {}).get("held_out_wells", []))
+    if near:
+        st.info(f"This location is at **{near}**"
+                + (" – a **blind well**: its logs were not used anywhere in the simulation, so this is a fair test."
+                   if near in held else " – a training well, so this is not an independent test."))
+
+    st.subheader("Run")
+    r1 = st.columns([1.4, 1, 3])
+    n = r1[0].select_slider("Number of pseudo-wells", [5000, 10000, 20000, 40000], value=20000, key="sim_n")
+    r1[2].caption(f"About {max(5, int(n / 20000 * 45))} s. The run is saved as soon as it finishes "
+                  "(outputs/simulation/) and can be reopened below.")
+    if r1[1].button("Run simulation", type="primary", disabled=not valid, key="sim_run"):
+        meta = _run_simulation_ui(int(il), int(xl), float(t0), float(t1), int(n))
+        if meta:
+            st.success(f"Saved **{meta['name']}** ({meta['runtime_s']} s).")
+
+    runs = sim_runs()
+    if not runs:
+        st.caption("No simulations yet.")
+        step_nav("sim")
+        return
+    st.subheader("Results")
+    labels = [p.stem for p in runs]
+    default = st.session_state.get("sim_selected")
+    choice = st.selectbox("Simulation", labels, index=labels.index(default) if default in labels else 0,
+                          key="sim_pick_run")
+    path = SIM_DIR / f"{choice}.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    r = _sim_result(str(path.with_suffix(".npz")), _mtime(path.with_suffix(".npz")))
+    t0r, t1r = meta["window_twt_ms"]
+    z0, z1 = meta.get("z_window_tvdss_m", [np.nan, np.nan])
+    k = st.columns(6)
+    k[0].metric("Location", f"IL {meta['inline']} / XL {meta['crossline']}")
+    k[1].metric("Window (TWT)", f"{t0r:.0f}–{t1r:.0f} ms")
+    k[2].metric("Approx. depth (TVDSS)", f"{z0:,.0f}–{z1:,.0f} m",
+                help=f"Time-depth from {meta['time_depth_from']} ({meta['time_depth_distance_km']} km away).")
+    k[3].metric("Pseudo-wells", f"{meta['n_realizations']:,}",
+                help="Effective number after weighting (lowest in the window): "
+                     f"{meta['ess_local_min']:,.0f}; median {meta['ess_local_median']:,.0f}.")
+    k[4].metric("P(gas column)", f"{meta['p_gas_column_posterior_global']:.2f}",
+                f"{meta['p_gas_column_posterior_global'] - meta['p_gas_column_prior']:+.2f} vs prior",
+                delta_color="off", help="Global weighting; read together with the P(gas | sand) track.")
+    k[5].metric("Seismic weight (beta)", f"{meta.get('adaptive_beta', 1.0):.2f}",
+                help="1 = full weight. Lower values mean the wells could not reproduce the seismic here, so the "
+                     "likelihood was softened to keep enough pseudo-wells.")
+    if meta.get("adaptive_beta", 1.0) < 0.5:
+        st.warning("The amplitudes here are outside what the training wells can produce (seismic weight "
+                   f"{meta['adaptive_beta']:.2f}). The result leans on the wells more than on the seismic – treat it "
+                   "as a weakly conditioned estimate.")
+    st.caption("SIMULATED pseudo-well – not measured data. Blind wells "
+               f"({', '.join(meta.get('held_out_wells_excluded', []))}) are never used.")
+
+    actual = None
+    near_r = _near_well(pos, meta["inline"], meta["crossline"])
+    if near_r:
+        actual = _actual_logs(near_r, t0r, t1r)
+        meta["_actual_well"] = near_r
+    tab1, tab2, tab3 = st.tabs(["Pseudo-well logs", "AVO signal", "Example pseudo-wells"])
+    with tab1:
+        st.plotly_chart(sim_wells_figure(r, meta, actual), width="stretch", key="sim_logs")
+        st.caption("Grey: prior (wells only). Blue: posterior (wells + seismic). Facies tracks are probabilities. "
+                   "Sw is shown for sands; non-reservoir rock is water-bearing (Sw = 1)."
+                   + (f" Black: actual logs of {near_r}; coloured squares next to the posterior facies: its log "
+                      "facies." if actual is not None else ""))
+        blind = SIM_DIR / f"{choice}_blind.csv"
+        if blind.is_file():
+            with st.expander("Blind-test scores against the actual logs"):
+                st.dataframe(pd.read_csv(blind), hide_index=True, width="stretch")
+    with tab2:
+        st.plotly_chart(sim_avo_figure(r, meta), width="stretch", key="sim_avo")
+        t_out = r["t_out_ms"][r["score_mask"].astype(bool)]
+        k_def = int(np.argmax(np.abs(r["obs_norm"][:, r["score_mask"].astype(bool)]).sum(axis=0)))
+        t_pick = st.select_slider("Time for the AVO curve (ms)", options=[float(v) for v in t_out],
+                                  value=float(t_out[k_def]), key=f"sim_avo_t_{choice}")
+        a, b = st.columns([1.3, 1])
+        a.plotly_chart(sim_avo_curve(r, meta, t_pick), width="stretch", key="sim_avo_curve")
+        b.markdown("**How to read this**\n\n"
+                   "- Black diamonds: observed near/mid/far amplitude at the chosen time.\n"
+                   "- Grey: what the wells alone predict here (prior).\n"
+                   "- Blue: pseudo-wells that match the seismic (posterior).\n\n"
+                   "Amplitudes are in calibrated synthetic units (seismic divided by the global scale from step 5); "
+                   "reverse polarity is applied, so a trough is an increase in impedance.")
+    with tab3:
+        st.plotly_chart(sim_examples_figure(r, meta), width="stretch", key="sim_examples")
+        st.caption("The 20 individual pseudo-wells that match the whole window best. They show realistic layering; "
+                   "the probability tracks summarise all pseudo-wells.")
+    step_nav("sim")
+
+
 PAGES = {
     "overview": st.Page(page_overview, title="Overview", icon="🏠", default=True, url_path="overview"),
     "data": st.Page(page_data, title="1 · Data", icon="🗂️", url_path="data"),
@@ -1138,6 +1629,7 @@ PAGES = {
     "traverse": st.Page(page_traverse, title="6 · Seismic through wells", icon="🧭", url_path="traverse"),
     "rockphysics": st.Page(page_rockphysics, title="7 · Rock physics", icon="🪨", url_path="rockphysics"),
     "next": st.Page(page_next, title="8 · AVO classification", icon="🎯", url_path="next"),
+    "sim": st.Page(page_simulation, title="9 · Prospect simulation", icon="🎲", url_path="simulation"),
 }
 
 if "well" not in st.session_state:
@@ -1148,18 +1640,20 @@ with st.sidebar:
     st.caption("Plover reservoir · Browse Basin")
 navigation = st.navigation({
     "Start": [PAGES["overview"]],
-    "Workflow": [PAGES[k] for k in ("data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next")],
+    "Workflow": [PAGES[k] for k in ("data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next", "sim")],
 })
 with st.sidebar:
     st.divider()
     st.markdown("**Progress**")
-    for key, label in (("data", "Data"), ("qc", "Well QC"), ("seismic", "Seismic cache"), ("tie", "Well tie")):
+    for key, label in (("data", "Data"), ("qc", "Well QC"), ("seismic", "Seismic cache"), ("tie", "Well tie"),
+                       ("sim", "Prospect simulation")):
         st.markdown(f"{STATUS_ICON[status[key]]} {label}")
     st.caption(f"Selected well: **{st.session_state['well']}**")
 # Test hook: POSEIDON_APP_PAGE=<page key> renders one page directly (used by headless tests).
 _forced_page = os.environ.get("POSEIDON_APP_PAGE")
 if _forced_page:
     {"overview": page_overview, "data": page_data, "logs": page_logs, "qc": page_qc, "seismic": page_seismic,
-     "tie": page_tie, "traverse": page_traverse, "rockphysics": page_rockphysics, "next": page_next}[_forced_page]()
+     "tie": page_tie, "traverse": page_traverse, "rockphysics": page_rockphysics, "next": page_next,
+     "sim": page_simulation}[_forced_page]()
 else:
     navigation.run()
