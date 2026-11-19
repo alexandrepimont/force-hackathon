@@ -1,49 +1,49 @@
-# 05 — Scenario priors: hand-picked (B) and learned (C)
+# 05 — Poseidon scenario priors
 
 ## Goal
 
-Generate realistic 1D elastic layer sequences with known lithology and fluid labels. Build two priors so we can test whether **geology learned from many wells** beats hand-picked parameter ranges. This comparison is the main scientific question.
+Build transparent scenario-based and, only if justified by task 02, Poseidon-well-informed elastic sequence priors. Quantify how prior choice affects downstream inference without claiming unsupported field labels.
 
 ## Inputs
 
-- FORCE 2020 wells (118 LAS files; check Vs coverage).
-- NPD formation tops for selecting relevant intervals.
-- Volve training wells from 02. **Exclude blind wells.**
-- Rock physics and Gassmann from 04.
+- QCed Poseidon logs, run metadata, and evidence-backed interpretations from task 02.
+- Rock-physics models and scenario bounds from task 04.
+- Eligible training/holdout well split established before sampling; exclude all held-out wells and their alternate runs from fitted priors.
 
-## Prior B — hand-picked Monte Carlo, from the constitution
+## Prior B — explicit scenario prior
 
-- Sample porosity, Vsh, layer thickness, fluid state, and Sw from explicit ranges in `configs/prior_b.yaml`.
-- Convert samples to Vp, Vs, and density with the rock-physics model from 04.
-- Build simple layered sequences, for example caprock above a reservoir or interbedded sand and shale.
+- Sample only parameters that are relevant to the defined Poseidon analysis and declare each range in `configs/prior_b.yaml`.
+- Separate measured Poseidon distributions from analyst-selected hypothetical ranges. Do not assign fluid or lithology truth labels to unobserved scenarios without marking their origin.
+- Convert to elastic properties only through documented models from task 04.
 
-## Prior C — learned from wells
+## Prior C — empirical Poseidon prior
 
-- **Start simple:** block-resample real log segments of Vp, Vs, density, and labels from FORCE and training wells in Jurassic and Hugin-equivalent intervals. Use formation tops to choose intervals.
-- Use Gassmann to create brine and oil versions of each sand segment, which yields fluid labels the wells alone do not cover.
-- Condition on depth and burial trend so segments are physically plausible for about 2700–3100 m.
-- **Optional, if time allows:** train a small generative model, such as a VAE or Markov chain over facies plus elastic properties, and compare it with block resampling.
+- First assess the number, diversity, and curve quality of eligible Poseidon wells and defensible labels. If evidence or sample size is inadequate, mark prior C unavailable rather than training on planted synthetic labels.
+- If justified, sample contiguous Poseidon log intervals from training wells only, preserving correlations and run provenance. Record how intervals and labels were selected.
+- Use fluid substitution or alternate label assignments only as explicit hypothetical scenarios, never as measured Poseidon fluid observations.
 
 ## Tasks
 
-1. Implement both generators behind the same interface: `sample(n, seed) -> list of (vp, vs, rho, litho, fluid, dz)`.
-2. Generate equal-size libraries for B and C.
-3. Compare B, C, and the real training wells with Vp/Vs-versus-AI crossplots, thickness distributions, and transition statistics.
+1. Implement a shared sampling interface that returns elastic sequences, sample metadata, and evidence/source tags.
+2. Generate comparable libraries only when both priors are supported; otherwise document why a comparison is not possible.
+3. Compare generated properties and sequence statistics with eligible Poseidon training wells. Show measured and estimated Vs separately, and avoid extrapolation beyond observed coverage without labeling it.
+4. Record seeds, source wells, selected intervals, exclusions, label basis, and any assumptions in metadata.
 
 ## Outputs
 
 - `src/priors.py`.
-- `configs/prior_b.yaml` and `configs/prior_c.yaml`.
-- `data/processed/priors/{B,C}/`: sequences and metadata.
-- `outputs/priors/`: comparison plots against real wells.
+- `configs/prior_b.yaml` and, when supported, `configs/prior_c.yaml`.
+- `data/processed/priors/{B,C}/` with sequences and provenance metadata.
+- `outputs/priors/` comparison plots and a feasibility note.
 
 ## Acceptance criteria
 
-- Both priors produce physically valid values: Vp > Vs, plausible densities, and no NaNs.
-- Plots show how B and C differ from real geology.
+- All generated values pass physical/range checks and include origin tags; missing and estimated inputs are not silently imputed.
+- Any learned prior excludes held-out wells and all their source variants.
+- A prior comparison is made only when comparable labels and data support it; otherwise the limitation is explicit.
 
 ## Pitfalls
 
-- **Leakage:** Blind wells must not contribute segments to prior C.
-- Many FORCE wells lie far from Volve and represent other geology. Use filtering and report which wells were used.
-- Estimated Vs in FORCE wells can bias prior C. Keep and report `vs_source`.
+- Do not use the conceptual synthetic reservoir as a Poseidon training population or evidence.
+- Do not pool unrelated external wells into prior C without explicit authorization, provenance, geological justification, and a revised scope.
+- A small set of wells does not support complex generative models; prefer an honest empirical/scenario analysis.

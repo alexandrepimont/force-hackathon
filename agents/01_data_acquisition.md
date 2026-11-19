@@ -1,46 +1,41 @@
-# 01 — Data inventory and verification
+# 01 — Poseidon data inventory and verification
 
 ## Goal
 
-Verify and catalogue the Volve and supporting datasets for a well-tied AVO study of the Hugin Formation. Record exactly what is available and what is missing.
-
-**The team downloads the Volve data manually.** This agent does not download Volve data. It works only with files the team has placed in `data/raw/`.
+Inventory the Poseidon files already in `data/poseidon/` and establish which well-log, marker, time-depth, and seismic inputs are actually usable. Record metadata, gaps, and provenance before selecting a scientific scope. Do not download additional data or assume a missing product exists.
 
 ## Inputs
 
-- Volve files downloaded by the team into `data/raw/{seismic,wells,horizons,docs}/`. The source is the [Equinor Volve page](https://www.equinor.com/energy/volve-data-sharing).
-- Local files in `C:\FORCE Hackathon 2026\`:
-  - FORCE 2020 LAS zip with 118 wells.
-  - NPD lithostratigraphy tables.
-  - RealPore core workbook.
-- Public SODIR Factpages for the Volve field and wellbores, including formation tops, DST results, and completion reports.
+- `data/poseidon/wells/`: supplied logs, extra well files, checkshots, tops, and geological/stratigraphic CSVs.
+- `data/poseidon/NearStack_8bit.cbvs` and `data/poseidon/FarStack_8bit.cbvs`.
+- `data/poseidon/full_stack_agc.mdio/`.
+- Any data dictionaries, project exports, and license/attribution notes supplied with the data.
 
 ## Tasks
 
-1. List the files in `data/raw/`. Check them against the wish list below, and report anything missing so the team can download it:
-   - **ST10010 time-migrated angle stacks:** near, mid, and far, plus the full stack and migration velocity if available.
-   - **Volve wells that penetrate Hugin:** LAS or DLIS logs, deviation surveys, checkshots or VSP, and formation tops.
-   - **Interpretations, if available:** horizons, especially Hugin top, and fault interpretation.
-2. Open each stack with `segyio`. Record the angle range per stack, sample rate, polarity convention, inline/crossline and coordinate headers, and survey vintage. Use the documentation for metadata that is not in the headers.
-3. Check each well file's curves, depth coverage through Hugin, units, and coordinate reference system.
-4. Build `data/interim/well_index.csv` with these columns:
-   `well, source, x, y, has_vp, has_vs, has_rho, has_gr, has_nphi, has_rt, has_checkshot, has_trajectory, hugin_top_md, hugin_base_md, inside_seismic, known_fluid`.
-5. Note which FORCE wells, especially in quadrant 15/9, overlap with or lie near Volve.
+1. Recursively list files, sizes, formats, and checksums for the Poseidon tree. Identify duplicate or alternate well runs without merging them. Include the synthetic-reservoir directory only as a separate software-test fixture, not as Poseidon evidence.
+2. Inventory well files by well and source/run. Record curve mnemonics, units, sample interval, depth range, null/sentinel conventions, and available coordinates. Include the `.LAS` files, time/depth variants, deviation/VSP files, tops/markers, and GA CSVs where present.
+3. Inspect the CBVS stacks and MDIO full stack with compatible metadata readers or the source application. Record whether each can be decoded, dimensionality, sample interval, geometry, coordinate/datum references, polarity, processing (including AGC), and any documented angle range. Do not guess missing metadata. Do not treat full stack, near stack, and far stack as interchangeable calibrated angles.
+4. Build a well-to-seismic coverage table only after coordinate systems and units are known. Checkshot/time-depth and trajectory coverage must be reported per well and source file.
+5. Record known limitations, including unreadable formats, absent metadata, missing curves, uncertain units, unknown CRS, and lack of independently confirmed lithology/fluid labels. Cite the source file for each inventory claim.
 
 ## Outputs
 
-- `data/interim/well_index.csv`.
-- `outputs/data_inventory.md`: what was found, file sizes, and a **missing-data list** for the team to download.
+- `data/interim/poseidon_well_index.csv` with source/run, available curves, depth ranges, markers, coordinates/reference, and time-depth coverage.
+- `outputs/data_inventory.md` with file catalog, metadata, provenance, readability, and a prioritized missing-information list (not an assumed download list).
+- G1 assessment in `outputs/decision_log.md`.
 
 ## Acceptance criteria
 
-- The near, mid, and far stacks load with `segyio`, and their geometry is understood.
-- At least 3 wells with Hugin coverage are listed, together with the logs available for each.
-- Gate **G1** is evaluated and recorded in `outputs/decision_log.md`.
+- The inventory can be traced to actual local files and distinguishes all source variants.
+- Every seismic volume is either characterized from metadata or explicitly marked undecoded/unverified; no angle or geometry is invented.
+- Well availability and seismic/time-depth compatibility are reported per well, without imposing a minimum well count before seeing the inventory.
+- Gate G1 is recorded with its evidence and a realistic scope decision.
 
 ## Pitfalls
 
-- Do not download, move, rename, or modify files in `data/raw/`. Treat them as read-only.
-- Do not assume a curve contains valid data in Hugin just because it exists in a LAS header. Check depth coverage.
-- Survey vintage matters. Production changed fluids after 2008, so compare well logging dates with the seismic acquisition date.
-- Do not commit raw data.
+- Treat all supplied source files as read-only. Do not rename, move, rewrite, or commit raw data.
+- A mnemonic in a LAS header does not prove valid measurements or documented units; inspect values and coverage.
+- Do not infer coordinates, datum, time units, stack angles, or polarity from a filename.
+- Keep AGC processing and 8-bit encoding visible as possible amplitude-calibration limitations.
+- Do not treat the synthetic reservoir, planted labels, or generated gathers as field observations.

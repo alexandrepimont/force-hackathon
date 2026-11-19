@@ -1,58 +1,36 @@
-# 10 — Diagnostics, what-if analysis, and report
+# 10 — Poseidon diagnostics, what-if analysis, and reporting
 
 ## Goal
 
-Make the results explorable and explain them honestly. Provide an agent layer that runs real simulations on request and compiles the final report and demo.
+Make Poseidon results traceable and interpretable without overstating evidence. Run reproducible scenario analyses on request and report which conclusions are measurements, interpretations, or hypothetical simulations.
 
 ## Inputs
 
-- Outputs from all tasks, `outputs/decision_log.md`, and configs.
+- Outputs and gate decisions from tasks 01–09, `outputs/decision_log.md`, and the exact configuration/model versions used.
+- Poseidon data provenance and license/attribution information from task 01.
 
 ## Tasks
 
-1. **What-if tool:** Let a user ask questions such as:
-   - "What if Hugin porosity is 5 pp lower at well X?"
-   - "What if Hugin is half as thick?"
-   - "What if the oil is replaced by brine?"
-
-   The agent edits a copy of the relevant config, runs tasks 04 → 06 → 07 for that well or location, and shows before-and-after synthetics and predictions. **No answer may be given without running the simulation.**
-2. **Ambiguity diagnostics:**
-   - Identify which scenarios produce near-identical near/mid/far responses but different labels.
-   - Explain which assumptions dominate each ambiguity, such as wavelet, Vs, porosity, or thickness.
-   - Use the deterministic checks from the constitution, such as entropy and top-2 margin, as inputs. The agent explains results; it does not invent them.
-3. **Value of information, optional:** Rank which extra observation would most reduce ambiguity, for example measured Vs, better wavelet control, or one more well. State that the ranking depends on the model and the chosen scenarios.
-4. **Report:** Write `outputs/report.md` with:
-   - the question;
-   - data used and its attribution;
-   - the decision log;
-   - blind-well A/B/C results;
-   - the fluid-sensitivity verdict;
-   - maps;
-   - limitations;
-   - next steps.
-5. **Demo:** Prepare a 5-minute flow:
-   1. Show the Gassmann panel.
-   2. Show real-versus-synthetic data in a crossplot.
-   3. Show the blind-well score table.
-   4. Show the map.
-   5. Run one live what-if example.
+1. **What-if analysis:** Accept parameter changes only for defined model inputs, such as a documented porosity range, interval thickness, or hypothetical fluid scenario. Copy the configuration, run the applicable physics/forward/inference steps, and show before/after inputs, outputs, and assumptions. Do not answer a simulation question without running it.
+2. **Ambiguity diagnostics:** Identify scenario pairs with similar responses but different labels, using only supported channels. Attribute ambiguity to tested factors such as Vs, porosity, wavelet, angle range, or thickness; do not invent causes.
+3. **Value of information (optional):** Compare candidate observations (for example, verified time-depth data, measured Vs, improved stack metadata, or independent labels) with a documented sensitivity experiment. State its model dependence.
+4. **Report:** Write `outputs/report.md` with the question, Poseidon files and provenance, inventory/gates, methods, eligible/held-out well counts, calibration/validation results, uncertainty, limitations, and next steps. For near/far analysis, state pair eligibility and evidence for geometry, angle ranges, processing, and common amplitude scale; distinguish matched-event observations from amplitude differences/ratios and scenario predictions. Report paired and single-channel results on the same wells where possible, or explicitly state why no comparison was possible. Separate Poseidon measurements from assumed and synthetic scenarios.
+5. **Demo (optional):** Show the inventory/readability gate, a supported well-QC or rock-physics result, validation only if available, and one reproducible what-if scenario. If seismic mapping is unsupported, explain why rather than showing an unrelated synthetic map.
 
 ## Outputs
 
-- `src/agent_diagnostics.py`, including the what-if runner.
+- `src/agent_diagnostics.py` with reproducible scenario execution, if an interactive runner is implemented.
 - `outputs/report.md`.
-- `outputs/demo/`.
+- `outputs/demo/` where appropriate.
 
 ## Acceptance criteria
 
-- Every number in the report comes from a file in `outputs/`.
-- Limitations are explicit, including:
-  - the number of blind wells;
-  - whether Vs was estimated or measured;
-  - the timing of seismic and logs relative to production;
-  - the assumptions behind the priors.
+- Every quantitative report claim links to a generated output or a cited Poseidon source file.
+- The report distinguishes measurements, interpretations, model-conditional probabilities, and hypothetical results.
+- Limitations include the number of eligible/held-out wells, measured versus estimated curves, unknown units/CRS/angles where applicable, calibration status, and prior assumptions.
 
 ## Pitfalls
 
-- Do not let the language model "interpret" beyond the simulations and data.
-- Do not call model-conditional probabilities "true probabilities" unless the blind-well reliability results support it.
+- Do not let a language model interpret beyond the data and executed simulations.
+- Do not call model-conditional probabilities calibrated field probabilities without adequate held-out validation.
+- Never present the conceptual synthetic dataset as Poseidon field evidence.

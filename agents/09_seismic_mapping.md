@@ -1,37 +1,36 @@
-# 09 — Seismic application and mapping
+# 09 — Poseidon seismic application and mapping
 
 ## Goal
 
-Apply the best validated method to a **small 3D subvolume around Hugin**. Produce maps that geoscientists can judge against known structure, wells, and contacts.
+Apply a validated method to a Poseidon seismic volume only if the volume is decoded, its geometry and reference are verified, and the method passed task 08. Mapping is optional; do not turn an AGC full-stack or undecoded CBVS product into unsupported probability maps.
 
 ## Inputs
 
-- Best method from task 08, with A always included for comparison.
-- Near, mid, and far stacks, plus the Hugin top horizon from task 01, or a horizon picked from well tops if needed.
+- Method and limitations from task 08, with baseline A included where comparable.
+- A decoded Poseidon volume with documented geometry, coordinates, time/depth reference, and usable processing/amplitude characteristics.
+- Verified well locations and any supplied tops/markers from tasks 01–02.
 
 ## Tasks
 
-1. Define a subvolume, for example the field outline plus a margin, and a time window around Hugin top.
-2. Apply the method trace by trace, or in windows. Parallelize if needed.
-3. Extract horizon maps along Hugin top or as an average over the interval:
-   - `p_sand`.
-   - `p_oil`, only if gate G3 passed.
-   - Entropy.
-   - Out-of-distribution score: distance from the observed features to the synthetic library.
-4. Overlay well locations, blind-well results, known fluid contacts, and structure contours.
-5. Produce an inline and a crossline section through the main wells.
+1. Verify spatial grid, coordinate system, units, sample axis, and well positioning. Stop if reference compatibility cannot be established.
+2. Define a volume/window using supplied Poseidon markers or an explicitly documented interval; do not invent named horizons or fluid contacts.
+3. Apply only to features/channels compatible with training and validation. Track missing data and out-of-distribution support; do not extrapolate confidently beyond the calibrated domain.
+4. Produce supported elastic/lithology summaries and uncertainty. Produce fluid maps only if G3 passed and independent evidence supports the fluid classes.
+5. Overlay eligible wells and supplied structural information only after coordinate compatibility is verified. Mark validation wells distinctly from other wells.
 
 ## Outputs
 
-- `data/processed/maps/*.npy` or GeoTIFF.
-- `outputs/maps/*.png`.
+- `data/processed/maps/` in a format that preserves verified grid metadata.
+- `outputs/maps/` figures and captions, or a short explanation if mapping is not supported.
 
 ## Acceptance criteria
 
-- Maps have consistent geometry and coordinates, and wells plot in the correct positions.
-- Every map has a short caption that states what it shows and what it does not show.
+- Every map has verified geometry/reference and a reproducible method/model version.
+- Captions state the evidence, uncertainty, limitations, and whether values are predictions or scenario outputs.
+- No synthetic-reservoir maps or unvalidated predictions are presented as Poseidon field results.
 
 ## Pitfalls
 
-- A plausible map is not validation because we already know the field. Use it as a consistency check, not as proof.
-- High out-of-distribution areas should be shown as low support, not presented as confident predictions.
+- A visually plausible map is not validation; use held-out wells for evidence.
+- Do not assume CBVS/MDIO decoding, coordinate references, or amplitude preservation.
+- Show unsupported/out-of-distribution areas as missing or low support, not as confident values.
