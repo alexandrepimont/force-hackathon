@@ -89,11 +89,14 @@ class Prior:
     sw_gas: np.ndarray               # Archie Sw of gas-indicated training sands
     wells: list[str]
     n_blocks: np.ndarray             # (F,)
+    ar1: float = 0.0                 # correlation of (whitened) property residuals between consecutive layers
+    ar1_calibration: dict | None = None
 
     def to_dict(self):
         return {"facies": self.facies, "proportions": self.proportions.round(4).tolist(),
                 "transitions": self.transitions.round(4).tolist(), "wells": self.wells,
-                "n_blocks": self.n_blocks.tolist(),
+                "n_blocks": self.n_blocks.tolist(), "ar1_between_layers": round(self.ar1, 3),
+                "ar1_calibration": self.ar1_calibration,
                 "mean_thickness_m": [round(float(t.mean()), 2) if len(t) else None for t in self.thickness],
                 "depth_range_m": self.depth_range.round(0).tolist(), "n_sw_gas": int(len(self.sw_gas))}
 
@@ -157,11 +160,15 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     # layers: runs of equal facies in consecutive blocks; unknown blocks and gaps break the sequence
     thickness = [[] for _ in facies]
     trans = np.zeros((len(facies), len(facies)))
+    layer_arr = np.full(len(blk), -1)
+    seq_arr = np.full(len(blk), -1)   # sequence id: consecutive layers without a break share it
+    layer_no, seq_no = 0, 0
     for _, g in blk.groupby("well"):
         g = g.sort_values("block")
-        fid, block = g["fid"].to_numpy(), g["block"].to_numpy()
+        fid, block, gidx = g["fid"].to_numpy(), g["block"].to_numpy(), g.index.to_numpy()
         start = 0
         prev_layer = None
+        seq_no += 1
         for i in range(1, len(g) + 1):
             end_run = i == len(g) or fid[i] != fid[start] or block[i] != block[i - 1] + 1
             if not end_run:
@@ -172,11 +179,17 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
                 if prev_layer is not None:
                     trans[prev_layer, f] += 1
                 prev_layer = f
+                layer_arr[gidx[start:i]] = layer_no
+                seq_arr[gidx[start:i]] = seq_no
+                layer_no += 1
             else:
                 prev_layer = None
+                seq_no += 1
             if i < len(g) and block[i] != block[i - 1] + 1:
                 prev_layer = None
+                seq_no += 1
             start = i
+    blk["layer"], blk["seq"] = layer_arr, seq_arr
     np.fill_diagonal(trans, 0)
     trans = (trans + 0.5) * (1 - np.eye(len(facies)))   # small pseudo-count keeps every transition possible
     trans /= trans.sum(axis=1, keepdims=True)
@@ -188,6 +201,12 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     chol = np.zeros((len(facies), n_p, n_p))
     depth_range = np.zeros((len(facies), 2))
     n_blocks = np.zeros(len(facies), dtype=int)
+    # one property vector per layer (mean of its good blocks): the simulation draws one value per layer, so the
+    # spread must be the spread of layer means, not of 1 m blocks
+    lay = ok[ok["layer"] >= 0].groupby("layer").agg(**{p: (p, "mean") for p in PROPS}, tvdss=("tvdss", "mean"),
+                                                     fid=("fid", "first"), seq=("seq", "first"),
+                                                     nb=("tvdss", "size"))
+    lay_res = np.full((len(lay), n_p), np.nan)
     for f in range(len(facies)):
         d = ok[ok["fid"] == f]
         n_blocks[f] = len(d)
@@ -204,20 +223,66 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
         else:
             a[f] = x.mean(axis=0)
             res = x - a[f]
-        cov = np.cov(res.T) + np.eye(n_p) * 1e-9 * np.abs(np.diag(np.cov(res.T))).max()
+        m = (lay["fid"] == f).to_numpy()
+        lres = lay.loc[m, PROPS].to_numpy() - (a[f] + b[f] * (lay.loc[m, "tvdss"].to_numpy()[:, None] - 4500.0))
+        if m.sum() >= 8:
+            res = lres
+        cov = np.cov(res.T)
+        cov = cov + np.eye(n_p) * 1e-9 * np.abs(np.diag(cov)).max()
         chol[f] = np.linalg.cholesky(cov)
+        lay_res[m] = np.linalg.solve(chol[f], lres.T).T      # whitened layer residuals
+    # vertical correlation of whitened residuals between consecutive layers in the same sequence (AR(1))
+    lay = lay.sort_index()
+    same = (lay["seq"].to_numpy()[1:] == lay["seq"].to_numpy()[:-1]) & (np.diff(lay.index.to_numpy()) == 1)
+    r1, r0 = lay_res[1:][same], lay_res[:-1][same]
+    ar1 = float(np.clip(np.nanmean([np.corrcoef(r0[:, k], r1[:, k])[0, 1] for k in range(n_p)]), 0.0, 0.95)) \
+        if same.sum() > 10 else 0.0
     props = np.array([sum(t) for t in thickness], dtype=float)
     return Prior(facies, props / props.sum(), trans, [np.array(t) for t in thickness], a, b, chol, depth_range,
-                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks)
+                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks, ar1)
 
 
 # ----------------------------------------------------------------------------------------- simulation
-def _draw_props(prior: Prior, f: np.ndarray, z: np.ndarray, margin: float, rng) -> np.ndarray:
+def calibrate_ar1(prior: Prior, cfg: dict, calib: dict, ties_dir: Path, held_out: list[str]) -> dict:
+    """Choose the between-layer correlation so that prior synthetics have the same RMS amplitude as the
+    synthetics computed from the TRAINING wells' own logs (task 03 tie outputs; no seismic, no held-out wells).
+
+    The per-facies property distributions are unchanged; only how strongly neighbouring layers differ."""
+    target = []
+    for f in sorted(ties_dir.glob("*.npz")):
+        if f.stem in held_out:
+            continue
+        d = np.load(f)
+        m = d["win_after"]
+        target.append(np.sqrt((d["syn_after"][:, m] ** 2).mean(axis=1)))
+    target = np.mean(target, axis=0)
+    stacks = [StackDef(k, v["angle_min"], v["angle_max"]) for k, v in calib["stacks"].items()]
+    wl = [fw.ricker(v["freq_hz"], 0.001, 0.128, v["phase_deg"]) for v in calib["stacks"].values()]
+    t_out = np.arange(3.1, 3.4, 0.004)
+    tm, r = fw.model_grid(t_out, 0.001)
+    z0 = float(np.mean(prior.depth_range[:, 1])) - 400.0
+    rows = []
+    for a1 in [prior.ar1, 0.5, 0.7, 0.8, 0.85, 0.9, 0.93, 0.95, 0.97]:
+        if a1 < prior.ar1:
+            continue
+        p = Prior(**{**prior.__dict__, "ar1": a1})
+        lay = simulate_layers(p, cfg, 600, z0, tm[0] - 0.002, tm[-1] + 0.002, (z0 + 50, z0 + 500),
+                              np.random.default_rng(11))
+        g = layers_to_grid(lay, tm, ["vp", "vs", "rho"])
+        syn = forward_batch(g, stacks, wl, r, -1.0)[:, :, 10:-10]
+        rms = np.sqrt((syn ** 2).mean(axis=(0, 2)))
+        rows.append((float(np.abs(np.log(rms / target)).mean()), a1, rms))
+    best = min(rows)
+    return {"ar1_estimated": round(prior.ar1, 3), "ar1_calibrated": best[1],
+            "target_rms_training_synthetics": target.round(4).tolist(), "prior_rms": best[2].round(4).tolist(),
+            "mean_abs_log_ratio": round(best[0], 3)}
+
+
+def _draw_props(prior: Prior, f: np.ndarray, z: np.ndarray, margin: float, eps: np.ndarray) -> np.ndarray:
     lo = prior.depth_range[f, 0] - margin
     hi = prior.depth_range[f, 1] + margin
     zc = np.clip(z, lo, hi) - 4500.0
     mean = prior.trend_a[f] + prior.trend_b[f] * zc[:, None]
-    eps = rng.standard_normal((len(f), len(PROPS)))
     x = mean + np.einsum("nij,nj->ni", prior.chol[f], eps)
     for k, p in enumerate(PROPS):
         x[:, k] = np.clip(x[:, k], *CLIP[p])
@@ -241,6 +306,8 @@ def simulate_layers(prior: Prior, cfg: dict, n: int, z_start: float, t_start: fl
     cum_t = np.full(n, t_start)
     cum_z = np.full(n, z_start)
     f = rng.choice(len(prior.facies), size=n, p=prior.proportions)
+    eps = rng.standard_normal((n, len(PROPS)))
+    a1 = prior.ar1
     cols = {k: [] for k in ["facies", "top_t", "top_z", "h", "phi", "vsh", "vp", "vs", "rho", "gr", "sw", "gas"]}
     cdf = np.cumsum(prior.transitions, axis=1)
     while True:
@@ -248,7 +315,8 @@ def simulate_layers(prior: Prior, cfg: dict, n: int, z_start: float, t_start: fl
         if not active.any():
             break
         h = np.array([prior.thickness[fi][rng.integers(len(prior.thickness[fi]))] for fi in f])
-        x = _draw_props(prior, f, cum_z + h / 2, margin, rng)
+        x = _draw_props(prior, f, cum_z + h / 2, margin, eps)
+        eps = a1 * eps + np.sqrt(1 - a1 ** 2) * rng.standard_normal(eps.shape)
         phi, vsh, vp, vs, rho, gr = x.T
         gas = gas_f[f] & (cum_z + h / 2 < contact)
         sw = np.ones(n)
@@ -394,10 +462,31 @@ def run_simulation(*, prior: Prior, cfg: dict, calib: dict, t_seis_s: np.ndarray
     j = np.arange(len(t_out))
     lo_i, hi_i = np.clip(j - half, 0, len(t_out)), np.clip(j + half + 1, 0, len(t_out))
     loc_ll = -0.5 * temper * (c[:, hi_i] - c[:, lo_i])
-    w_loc = np.exp(loc_ll - loc_ll.max(axis=0, keepdims=True))
-    w_loc /= w_loc.sum(axis=0, keepdims=True)
+    loc_ll -= loc_ll.max(axis=0, keepdims=True)
+    sc_cols = np.flatnonzero(score)
+
+    def local_weights(beta):
+        w = np.exp(beta * loc_ll)
+        return w / w.sum(axis=0, keepdims=True)
+
+    def min_ess(beta):
+        w = np.exp(beta * loc_ll[:, sc_cols])
+        w /= w.sum(axis=0, keepdims=True)
+        return float((1.0 / (w ** 2).sum(axis=0)).min())
+
+    # adaptive tempering: soften the likelihood only if the prior cannot reproduce the data well enough to give
+    # min_ess_target effective realizations everywhere in the window (beta = 1 means no softening)
+    beta = 1.0
+    target = min(lcfg.get("min_ess_target", 200), n / 10)
+    if min_ess(1.0) < target:
+        lo_b, hi_b = 0.0, 1.0
+        for _ in range(25):
+            mid = 0.5 * (lo_b + hi_b)
+            lo_b, hi_b = (mid, hi_b) if min_ess(mid) >= target else (lo_b, mid)
+        beta = max(lo_b, 1e-4)
+    w_loc = local_weights(beta)
     ess_loc = 1.0 / (w_loc ** 2).sum(axis=0)
-    glob_ll = -0.5 * temper * mis.sum(axis=1)
+    glob_ll = -0.5 * temper * beta * mis.sum(axis=1)
     w_glob = np.exp(glob_ll - glob_ll.max())
     w_glob /= w_glob.sum()
     ess_glob = float(1.0 / (w_glob ** 2).sum())
@@ -464,7 +553,7 @@ def run_simulation(*, prior: Prior, cfg: dict, calib: dict, t_seis_s: np.ndarray
                                              for kk in range(len(stacks))], axis=1)
     return {"t_model_s": t_model, "t_out_s": t_out, "score_mask": score, "obs_norm": obs_n, "summary": summary,
             "examples": kept, "ess_local": ess_loc, "ess_global": ess_glob, "n": n, "temper": temper,
-            "sigma": sigma, "scales": scales, "stacks": [s.name for s in stacks],
+            "sigma": sigma, "scales": scales, "stacks": [s.name for s in stacks], "beta": beta,
             "z_window": z_window, "facies": prior.facies, "half_window_ms": half * dt_out_ms}
 
 
@@ -483,6 +572,10 @@ def save_result(path: Path, res: dict, meta: dict) -> dict:
     np.savez_compressed(path.with_suffix(".npz"), **arrays)
     sc = res["score_mask"]
     meta = {**meta, "n_realizations": res["n"], "likelihood_temper": round(res["temper"], 4),
+            "adaptive_beta": round(res["beta"], 4),
+            "rms_obs": [round(float(v), 4) for v in np.sqrt((res["obs_norm"][:, sc] ** 2).mean(axis=1))],
+            "rms_prior_spread": [round(float(v), 4) for v in
+                                   np.sqrt(((0.5 * (s["prior_syn_q"][2] - s["prior_syn_q"][0]))[:, sc] ** 2).mean(axis=1))],
             "localization_half_window_ms": res["half_window_ms"],
             "ess_local_min": round(float(res["ess_local"][sc].min()), 1),
             "ess_local_median": round(float(np.median(res["ess_local"][sc])), 1),
@@ -518,3 +611,48 @@ def location_td(root: Path, x: float, y: float, held_out: list[str]) -> tuple[np
             best = (d, r.WELL_ID, td.dropna(subset=["twt_final_ms"]))
     d, well, td = best
     return td["twt_final_ms"].to_numpy() / 1000, td["tvdss"].to_numpy(), well, d / 1000
+
+def prepare_prior(root: Path, cfg: dict, calib: dict, held_out: list[str]) -> Prior:
+    """Prior from the training wells, with the between-layer correlation calibrated (if configured)."""
+    prior = build_prior(root / "data" / "interim" / "poseidon_logs", held_out, cfg)
+    if cfg["training"].get("calibrate_layer_correlation", True):
+        cal = calibrate_ar1(prior, cfg, calib, root / "outputs" / "well_ties", held_out)
+        prior.ar1, prior.ar1_calibration = cal["ar1_calibrated"], cal
+    return prior
+
+
+def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *, n: int | None = None,
+                    name: str | None = None, well: str | None = None, prior: Prior | None = None,
+                    progress=None) -> dict:
+    """Simulate a pseudo-well at (il, xl) over the TWT window [t0_ms, t1_ms] and save it to outputs/simulation."""
+    import time
+
+    from .welltie import well_traces
+
+    t_start = time.time()
+    cfg, calib, petro = load_configs(root)
+    held_out = petro["held_out_wells"]
+    tie_cfg = yaml.safe_load((root / "configs" / "well_tie.yaml").read_text(encoding="utf-8"))
+    cache = root / "data" / "poseidon" / "seismic" / "cache"
+    g = np.load(cache / "poseidon_near.geometry.npz")
+    i, j = int(np.searchsorted(g["ilines"], il)), int(np.searchsorted(g["xlines"], xl))
+    x, y = float(g["cdp_x"][i, j]), float(g["cdp_y"][i, j])
+    if not (g["samples"][0] + cfg["pad_ms"] <= t0_ms < t1_ms <= g["samples"][-1] - cfg["pad_ms"]):
+        raise ValueError("window must lie inside the seismic time range (minus the modelling pad)")
+    prior = prior or prepare_prior(root, cfg, calib, held_out)
+    td_t, td_z, td_well, td_km = location_td(root, x, y, held_out)
+    t_seis, obs = well_traces(cache, list(calib["stacks"]), il, xl, tie_cfg["trace_bundle"])
+    res = run_simulation(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis, obs=obs, t_top_s=t0_ms / 1000,
+                         t_base_s=t1_ms / 1000, td=(td_t, td_z), n=n, progress=progress)
+    name = name or (f"well_{well}" if well else f"il{il}_xl{xl}_{int(t0_ms)}_{int(t1_ms)}")
+    meta = {"name": name, "inline": int(il), "crossline": int(xl), "x": x, "y": y,
+            "window_twt_ms": [float(t0_ms), float(t1_ms)], "well": well,
+            "well_is_held_out": bool(well in held_out) if well else None,
+            "training_wells": prior.wells, "held_out_wells_excluded": held_out,
+            "time_depth_from": td_well, "time_depth_distance_km": round(td_km, 2),
+            "trace_selection": f"mean of {tie_cfg['trace_bundle']}x{tie_cfg['trace_bundle']} traces",
+            "runtime_s": round(time.time() - t_start, 1), "config": cfg}
+    out = root / "outputs" / "simulation"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "prior.json").write_text(json.dumps(prior.to_dict(), indent=2), encoding="utf-8")
+    return save_result(out / name, res, meta)

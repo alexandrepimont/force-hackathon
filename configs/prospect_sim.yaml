@@ -13,6 +13,9 @@ training:
   facies: [shale, sand_high_phi, sand_low_phi, tight, volcanic]   # 'unknown' is not simulated
   min_samples_trend: 40        # fewer blocks than this -> no depth trend for that facies
   trend_depth_margin_m: 300.0  # depth trends are not extrapolated more than this outside the training range
+  # Neighbouring layers are correlated (AR(1) on property residuals). The correlation is calibrated so that prior
+  # synthetics match the RMS amplitude of the training wells' own log synthetics (no seismic, no held-out wells).
+  calibrate_layer_correlation: true
 
 fluid:
   # No fluid labels exist (agent rule). Training sands with hc_indicator == gas_indicated are Gassmann-substituted
@@ -39,6 +42,7 @@ likelihood:
   # +/- this half-window (about one wavelet). Plain global weighting collapses to a handful of realizations
   # for windows of a few hundred ms.
   localization_half_window_ms: 32
+  min_ess_target: 200          # adaptive tempering: likelihood is softened (beta < 1) only if needed to reach this
   min_ess_warning: 50
   n_best: 30                   # best globally matching realizations kept as example pseudo-wells
   n_prior_examples: 200

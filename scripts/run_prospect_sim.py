@@ -12,29 +12,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from avo import prospect_sim as ps  # noqa: E402
-from avo.welltie import well_traces  # noqa: E402
 
-CACHE = ROOT / "data" / "poseidon" / "seismic" / "cache"
 OUT = ROOT / "outputs" / "simulation"
-
-
-def grid_xy(il: int, xl: int) -> tuple[float, float]:
-    g = np.load(CACHE / "poseidon_near.geometry.npz")
-    i = int(np.searchsorted(g["ilines"], il))
-    j = int(np.searchsorted(g["xlines"], xl))
-    return float(g["cdp_x"][i, j]), float(g["cdp_y"][i, j])
 
 
 def blind_comparison(res_npz: Path, well: str, t0: float, t1: float, facies: list[str]) -> pd.DataFrame:
@@ -100,9 +89,7 @@ def main():
     ap.add_argument("--name")
     a = ap.parse_args()
 
-    cfg, calib, petro = ps.load_configs(ROOT)
-    held_out = petro["held_out_wells"]
-    tie_cfg = yaml.safe_load((ROOT / "configs" / "well_tie.yaml").read_text(encoding="utf-8"))
+    cfg, _, _ = ps.load_configs(ROOT)
     if a.well:
         tie = json.loads((ROOT / "outputs" / "well_ties" / f"{a.well}.json").read_text(encoding="utf-8"))["result"]
         il, xl = tie["inline"], tie["crossline"]
@@ -111,32 +98,16 @@ def main():
         il, xl, t0, t1 = a.il, a.xl, a.t0, a.t1
         if None in (il, xl, t0, t1):
             ap.error("give --well or all of --il --xl --t0 --t1")
-    name = a.name or (f"well_{a.well}" if a.well else f"il{il}_xl{xl}_{int(t0)}_{int(t1)}")
-    x, y = grid_xy(il, xl)
-
-    t_start = time.time()
-    prior = ps.build_prior(ROOT / "data" / "interim" / "poseidon_logs", held_out, cfg)
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "prior.json").write_text(json.dumps(prior.to_dict(), indent=2), encoding="utf-8")
-    td_t, td_z, td_well, td_km = ps.location_td(ROOT, x, y, held_out)
-    t_seis, obs = well_traces(CACHE, list(calib["stacks"]), il, xl, tie_cfg["trace_bundle"])
-    res = ps.run_simulation(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis, obs=obs, t_top_s=t0 / 1000,
-                            t_base_s=t1 / 1000, td=(td_t, td_z), n=a.n)
-    meta = {"name": name, "inline": il, "crossline": xl, "x": x, "y": y, "window_twt_ms": [t0, t1],
-            "well": a.well, "well_is_held_out": bool(a.well in held_out) if a.well else None,
-            "training_wells": prior.wells, "held_out_wells_excluded": held_out,
-            "time_depth_from": td_well, "time_depth_distance_km": round(td_km, 2),
-            "trace_selection": f"mean of {tie_cfg['trace_bundle']}x{tie_cfg['trace_bundle']} traces",
-            "runtime_s": round(time.time() - t_start, 1), "config": cfg}
-    ps.save_result(OUT / name, res, meta)
-    m = json.loads((OUT / f"{name}.json").read_text(encoding="utf-8"))
-    print(f"{name}: local ESS min {m['ess_local_min']} / median {m['ess_local_median']} of {res['n']} "
+    m = ps.run_at_location(ROOT, il, xl, t0, t1, n=a.n, name=a.name, well=a.well)
+    name = m["name"]
+    print(f"{name}: local ESS min {m['ess_local_min']} / median {m['ess_local_median']} of {m['n_realizations']} "
           f"(global {m['ess_global']}), P(gas column) prior {m['p_gas_column_prior']} -> posterior "
-          f"{m['p_gas_column_posterior_global']}, {meta['runtime_s']} s")
+          f"{m['p_gas_column_posterior_global']}, beta {m['adaptive_beta']}, rms obs {m['rms_obs']} vs prior spread "
+          f"{m['rms_prior_spread']}, {m['runtime_s']} s")
     if m["ess_local_min"] < cfg["likelihood"]["min_ess_warning"]:
         print(f"WARNING: low local effective sample size ({m['ess_local_min']}); increase --n")
     if a.well:
-        cmp = blind_comparison(OUT / f"{name}.npz", a.well, t0, t1, prior.facies)
+        cmp = blind_comparison(OUT / f"{name}.npz", a.well, t0, t1, cfg["training"]["facies"])
         cmp.to_csv(OUT / f"{name}_blind.csv", index=False)
         print(cmp.to_string(index=False))
 
