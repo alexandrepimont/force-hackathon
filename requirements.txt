@@ -1,0 +1,11 @@
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+matplotlib>=3.8
+pyyaml>=6.0
+segyio>=1.9
+pytest>=8.0
+plotly>=5.24
+streamlit>=1.49
+lasio>=0.31
+numcodecs>=0.12

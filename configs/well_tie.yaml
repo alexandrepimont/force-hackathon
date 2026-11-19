@@ -1,0 +1,34 @@
+# Well tie / calibration parameters (agent task 03). Read by scripts/run_well_tie.py; results are written to
+# configs/calibration.yaml (generated) and outputs/well_ties/.
+
+dt_model_s: 0.001
+reference_wavelet_hz: 25.0        # Ricker used for the first (alignment) pass, before wavelets are estimated
+wavelet_length_s: 0.128
+edge_margin_s: 0.032              # samples this close to the ends of the log interval are excluded from correlation
+min_window_samples: 15            # minimum overlap (4 ms samples) for a tie to be attempted
+wavelet_freqs_hz: [8, 50, 1]      # start, stop, step
+wavelet_phases_deg: [-60, 60, 10] # residual phase after the documented polarity is applied
+
+trace_bundle: 3                   # average of an n x n trace bundle centred on the nearest trace to the well
+
+td_sources:                       # checkshot-calibrated time-depth sources (all TVDSS, metres)
+  Kronos-1: {file: logs_extra/Kronos-1/CP_Kronos1_Logs_depth.las, kind: vsp_adjusted_sonic_owt,
+             column_index: 1, depth: "TVD below MSL", time: "one-way time (s), ADJS"}
+  Pharos-1: {file: logs_extra/Pharos-1/COP_Pharos-1_logs_depth.las, kind: vsp_calibrated_sonic,
+             column_index: 3, depth: "TVD below SRD (= MSL, EPD 0)", time: "integrated calibrated DTCO (us/ft)"}
+  Torosa-3: {file: logs_extra/Torosa-3/VSP_Torosa3.txt, kind: vsp_checkshot_levels, x: 388422.09, y: 8461311.00,
+             depth: "TVD (assumed below MSL; first level 483 m at 0.32 s OWT ~ 1510 m/s water)", time: "OWT (s)"}
+
+transfer:
+  max_distance_km: 25.0           # donors further away are rejected
+  max_plover_depth_diff_m: 250.0  # reject donors whose Plover top differs more than this (velocity compatibility)
+
+auto_tie:
+  max_shift_ms_own_td: 20         # well has its own checkshot-calibrated time-depth
+  max_shift_ms_transferred: 60    # time-depth transferred from another well
+  shift_step_ms: 1
+  max_stretch_pct: 2.0            # linear stretch/squeeze about the tie-window centre
+  stretch_step_pct: 0.5
+  shift_penalty: 0.05             # score = corr - penalty * |shift| / max_shift (prefers the smallest good shift)
+  passes: 2                       # pass 1: reference wavelet; pass 2: estimated wavelets
+  g2_min_corr: 0.5                # gate G2 threshold for the mean near/mid/far correlation at training wells

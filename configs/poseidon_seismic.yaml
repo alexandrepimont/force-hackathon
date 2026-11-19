@@ -1,0 +1,40 @@
+# Documented facts about the Poseidon seismic used in this repository (task 01 / 03 inputs).
+# Source: CGGVeritas "Seismic Data Processing Report, Poseidon and BKG06B Marine 3D" (Oct 2009 - Jul 2011),
+#         https://dgbes.com/images/PDF/Processing_Report_Poseidon3D.pdf, pages 10-17.
+# Volumes: TGS Open Data MDIO copies (s3://tgs-opendata-poseidon, CC BY 4.0) of psdn11_TbsdmF_{Near,Mid,Far}
+#          (32-bit float), sub-volume written to data/poseidon/seismic/poseidon_{near,mid,far}.segy by
+#          scripts/download_poseidon_seismic.py.
+
+domain: time                     # 3D pre-stack time migration (Kirchhoff PSTM)
+sample_interval_ms: 4
+crs: "GDA94 / MGA zone 51 (EPSG:28351)"
+geometry:
+  inline_byte: 189
+  crossline_byte: 193
+  inline_bin_m: 18.75
+  crossline_bin_m: 12.5
+  window: {inlines: [2310, 3625], crosslines: [1292, 2769], twt_ms: [2560, 4092]}
+
+polarity: "reverse: a trough is an increase in acoustic impedance (report steps 5/6: 'Reverse polarity to make trough an increase in impedance')"
+
+stacks:                          # report step 32/28 'Final Angle Stacks'
+  near: {angle_min: 6, angle_max: 18}
+  mid: {angle_min: 18, angle_max: 30}
+  far: {angle_min: 30, angle_max: 42}
+  full: {angle_min: 6, angle_max: 42, note: "full stack in this dataset is AGC'd; not used for amplitudes"}
+
+post_stack_processing:           # report step 34, applied to the final AVA stacks
+  - amplitude-only Q compensation
+  - time variant scaling (parameters not documented; whether it is common to all stacks is unknown)
+  - diffracted multiple attenuation
+  - random noise attenuation
+
+pair_eligibility:
+  geometry_and_sampling: verified identical (same inlines, crosslines, samples in all three SEG-Y files)
+  bit_depth: 32-bit float (not the 8-bit CBVS copies)
+  agc: "no AGC stated for the angle stacks (only the full stack is labelled 'w_AGC')"
+  common_amplitude_scale: unknown   # time variant scaling parameters undocumented
+  verdict: >-
+    conditional: near/mid/far are tied separately with one global scale per stack fitted on training wells.
+    Near-far amplitude differences are usable only after that calibration and carry the extra uncertainty
+    of the undocumented time variant scaling.

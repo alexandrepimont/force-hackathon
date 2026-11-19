@@ -14,3 +14,16 @@ _book
 *.epub
 *.mobi
 *.pdf
+
+# Downloaded third-party well data (Poseidon open dataset)
+data/poseidon/
+
+# Local environment and generated files
+.venv/
+__pycache__/
+*.egg-info/
+data/interim/
+data/processed/
+data/synthetic/
+outputs/simulation/
+

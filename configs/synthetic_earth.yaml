@@ -1,0 +1,63 @@
+# Synthetic "truth" earth used to test the workflow before Volve data is available.
+# The pipeline never reads these parameters; it only sees wells, checkshots, a horizon and the cube.
+seed: 42
+
+grid: {n_il: 40, n_xl: 40}
+geometry: {il0: 1001, xl0: 2001, x0: 435000.0, y0: 6477000.0, bin: 12.5}   # synthetic survey numbering/coordinates
+depth: {z_top: 2600.0, z_base: 3300.0, dz: 0.5}       # m TVDSS window modelled
+overburden_velocity: 2300.0                            # m/s average above z_top -> TWT of z_top
+
+structure: {crest_depth: 2860.0, relief: 160.0}        # Hugin top dome
+fluids: {owc: 2930.0, sw_oil: 0.2, transition: 5.0}
+
+reservoir:                                             # truth fluid conditions (Batzle-Wang inputs)
+  pressure_mpa: 30.0
+  temperature_c: 110.0
+  salinity_ppm: 50000
+  oil_api: 29.0
+  gor: 90.0
+  gas_gravity: 0.74
+
+rock_physics: {phic: 0.40, exponent: 1.8}
+minerals: {quartz: [36.6, 45.0, 2.65], clay: [21.0, 7.0, 2.58], calcite: [76.8, 32.0, 2.71]}
+
+overburden: {vsh: 0.85, phi: 0.15, stringer_above_top: 25.0, stringer_thickness: 1.5}
+hugin:
+  thickness_min: 10.0      # west (tuning)
+  thickness_max: 80.0      # east
+  phi_top: 0.24
+  phi_base: 0.17
+  phi_lateral: 0.04        # porosity increases to the north
+  vsh: 0.08
+  shale_break: {rel_depth: 0.45, max_thickness: 3.0}
+  cemented_stringer: {rel_depth: 0.75, max_thickness: 1.5}
+tight: {phi: 0.04, calcite: 0.6, vsh: 0.05}
+underburden: {sand_phi: 0.14, sand_vsh: 0.2, shale_phi: 0.12, shale_vsh: 0.8, period: 12.0, sand_fraction: 0.45}
+
+seismic:
+  t0: 2.20
+  dt: 0.004
+  nt: 125
+  dt_model: 0.001
+  stacks:
+    - {name: near, angle_min: 5, angle_max: 15}
+    - {name: mid, angle_min: 15, angle_max: 25}
+    - {name: far, angle_min: 25, angle_max: 35}
+  wavelets:                # unknown to the pipeline; it must estimate them at the wells
+    near: {freq: 30.0, phase: 10.0}
+    mid: {freq: 27.0, phase: 10.0}
+    far: {freq: 23.0, phase: 10.0}
+  scale: {near: 9000.0, mid: 8000.0, far: 7000.0}
+  snr: 4.0
+  horizon_noise_ms: 2.0
+
+wells:
+  - {name: W1, il: 20, xl: 26}
+  - {name: W2, il: 18, xl: 8}
+  - {name: W3, il: 34, xl: 32}
+  - {name: W4, il: 6, xl: 20}
+  - {name: W5, il: 27, xl: 16}
+  - {name: W6, il: 10, xl: 36}
+vs_missing: [W4]           # Vs estimated with Greenberg-Castagna in this well
+log_noise: 0.01
+checkshot: {spacing: 25.0, noise_ms: 1.0}
