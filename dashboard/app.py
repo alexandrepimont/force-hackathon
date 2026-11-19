@@ -127,6 +127,42 @@ def tie_meta(well: str):
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
+def _short_top(name: str) -> str:
+    for word in (" Formation", " Member", " Fm"):
+        name = name.replace(word, "")
+    return name
+
+
+def add_well_tops(fig, well, x, t_lo, t_hi, half_width, row=None, col=None, labels=True):
+    """Tops of a tied well (TWT after the tie) as short ticks across the well line, labelled on the right.
+    The ticks are markers, so on a clickable section a click on a top returns its time."""
+    data = tie(well)
+    if data is None:
+        return
+    tops = sorted((float(t), _short_top(str(n))) for n, t in zip(data["tops_names"], data["tops_twt_ms"])
+                  if np.isfinite(t) and t_lo <= t <= t_hi)
+    if not tops:
+        return
+    kw = {"row": row, "col": col} if row else {}
+    xs, ys, txt = [], [], []
+    for t, name in tops:
+        xs += [x - half_width, x + half_width, None]
+        ys += [t, t, None]
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line={"color": "#111111", "width": 3}, hoverinfo="skip",
+                             showlegend=False), **kw)
+    fig.add_trace(go.Scatter(x=[x] * len(tops), y=[t for t, _ in tops], mode="markers",
+                             marker={"symbol": "line-ew", "size": 30, "opacity": 0,
+                                     "line": {"width": 8, "color": "#111111"}},
+                             unselected={"marker": {"opacity": 0}}, selected={"marker": {"opacity": 0}},
+                             text=[n for _, n in tops], showlegend=False,
+                             hovertemplate=f"{well}: %{{text}}<br>%{{y:.0f}} ms<extra>top</extra>"), **kw)
+    if labels:
+        for (t, name), ty in zip(tops, spaced_labels([t for t, _ in tops], (t_hi - t_lo) / 28)):
+            fig.add_annotation(x=x + half_width, y=ty, text=name, showarrow=False, xanchor="left",
+                               font={"size": 10, "color": "#111111"}, bgcolor="rgba(255,255,255,0.8)",
+                               borderpad=1, **kw)
+
+
 def calibration():
     return yaml.safe_load(CAL_PATH.read_text()) if CAL_PATH.is_file() else None
 
@@ -275,12 +311,21 @@ def run_script(script: str, label: str):
             status.update(label=f"{label} failed (see output)", state="error")
 
 
-def basemap(geometry, positions, lines=(), highlight=False, height=380, title=None):
+def basemap(geometry, positions, lines=(), highlight=False, height=380, title=None, clickable=False):
     w = wells()
     ox, oy = survey_outline(geometry)
     fig = go.Figure(go.Scatter(x=ox, y=oy, mode="lines", fill="toself", name="Seismic area",
                                fillcolor="rgba(31,111,235,0.18)" if highlight else "rgba(31,111,235,0.06)",
                                line={"color": BLUE, "width": 1.5}, hoverinfo="skip"))
+    if clickable:
+        # invisible clickable grid: plotly only reports clicks on markers
+        step = 24
+        ii, jj = np.meshgrid(geometry["ilines"][::step], geometry["xlines"][::step], indexing="ij")
+        fig.add_trace(go.Scatter(x=geometry["cdp_x"][::step, ::step].ravel(),
+                                 y=geometry["cdp_y"][::step, ::step].ravel(), mode="markers", name="click",
+                                 marker={"size": 9, "color": "rgba(31,111,235,0.04)"},
+                                 customdata=np.c_[ii.ravel(), jj.ravel()],
+                                 hovertemplate="IL %{customdata[0]} / XL %{customdata[1]}<extra>click</extra>"))
     for x, y, label in lines:
         fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=label, line={"color": RED, "width": 4}))
     selected = st.session_state.get("well")
@@ -297,6 +342,10 @@ def basemap(geometry, positions, lines=(), highlight=False, height=380, title=No
     style(fig, height, legend_below=False, showlegend=False,
           title={"text": title or "Location", "font": {"size": 13}})
     fig.update_layout(margin={"l": 10, "r": 10, "t": 40, "b": 10})
+    if clickable:
+        fig.update_layout(clickmode="event+select", dragmode="pan")
+        fig.update_traces(unselected={"marker": {"opacity": 1}}, selector={"type": "scatter", "mode": "markers"})
+        fig.update_traces(unselected={"marker": {"opacity": 1}}, selector={"type": "scatter", "mode": "markers+text"})
     return fig
 
 
@@ -605,6 +654,11 @@ def page_seismic():
                   int(wrow["CROSSLINE"]))
         step_nav("seismic")
         return
+    clicked = _map_click_ilxl("seis_map", geometry)
+    if clicked and view == "Inline":
+        st.session_state[f"seis_il_{well}"] = clicked[0]
+    elif clicked and view == "Crossline":
+        st.session_state[f"seis_xl_{well}"] = clicked[1]
     if view == "Inline":
         kind, value = "inline", st.slider("Inline", int(ilines[0]), int(ilines[-1]), int(wrow["INLINE"]),
                                           key=f"seis_il_{well}")
@@ -650,6 +704,8 @@ def page_seismic():
             for _, wl in near.iterrows():
                 fig.add_vline(x=float(wl[along]), line={"color": "black", "width": 2 if wl["WELL_ID"] == well else 1},
                               row=row, col=1)
+                add_well_tops(fig, wl["WELL_ID"], float(wl[along]), float(tw[0]), float(tw[1]),
+                              max(4.0, (lateral[-1] - lateral[0]) / 120), row=row, col=1)
                 if row == 1:
                     fig.add_annotation(x=float(wl[along]), y=1.0, yref="y domain", yanchor="bottom", showarrow=False,
                                        text=wl["WELL_ID"], font={"size": 10}, bgcolor="rgba(255,255,255,.85)")
@@ -661,10 +717,29 @@ def page_seismic():
         lines = [(geometry["cdp_x"][i, :], geometry["cdp_y"][i, :], f"Inline {value}")] if kind == "inline" else \
             [(geometry["cdp_x"][:, j], geometry["cdp_y"][:, j], f"Crossline {value}")]
     left.plotly_chart(fig, width="stretch", key="seis_fig")
-    right.plotly_chart(basemap(geometry, pos, lines, highlight=kind == "time",
+    clickable = kind != "time"
+    right.plotly_chart(basemap(geometry, pos, lines, highlight=kind == "time", clickable=clickable,
                                title=f"{view} {value:.0f}" + (" ms" if kind == "time" else "")),
-                       width="stretch", key="seis_map")
+                       width="stretch", key="seis_map", on_select="rerun", selection_mode="points")
+    if clickable:
+        right.caption(f"Click the map to choose the {kind}.")
     step_nav("seismic")
+
+
+def _map_click_ilxl(key, geometry):
+    """(inline, crossline) of the trace nearest to a new click on a clickable basemap, else None."""
+    ev = st.session_state.get(key)
+    try:
+        pts = list(ev["selection"]["points"]) if ev else []
+    except (KeyError, TypeError):
+        pts = []
+    sig = tuple((round(p.get("x", 0)), round(p.get("y", 0))) for p in pts)
+    if not pts or sig == st.session_state.get(f"{key}_sig"):
+        return None
+    st.session_state[f"{key}_sig"] = sig
+    d = (geometry["cdp_x"] - pts[-1]["x"]) ** 2 + (geometry["cdp_y"] - pts[-1]["y"]) ** 2
+    i, j = np.unravel_index(np.argmin(d), d.shape)
+    return int(geometry["ilines"][i]), int(geometry["xlines"][j])
 
 
 def render_3d(path, geometry, pos, samples, clip_pct, colorscale, il0, xl0):
@@ -1284,6 +1359,7 @@ def sim_section_fig(ready, geometry, pos, il, xl, kind, stack, t0, t1, picks):
             fig.add_vline(x=float(w[along]), line={"color": "#24292f", "width": 1})
             fig.add_annotation(x=float(w[along]), y=1.0, yref="y domain", yanchor="bottom", showarrow=False,
                                text=w["WELL_ID"], font={"size": 10}, bgcolor="rgba(255,255,255,.85)")
+            add_well_tops(fig, w["WELL_ID"], float(w[along]), float(ts[0]), float(ts[-1]), 7)
     fig.update_yaxes(autorange="reversed", title_text="TWT (ms)")
     fig.update_xaxes(title_text=along.title())
     style(fig, 470, legend_below=False, showlegend=False,
