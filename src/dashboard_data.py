@@ -26,11 +26,35 @@ TABLE_CANDIDATES = {
 
 
 def table_candidates(directory: Path, table_kind: str) -> list[Path]:
-    """List known matching tables and safe CSV/Parquet fallbacks in a folder."""
+    """List known matching tables and safe supported fallbacks in a folder."""
     if table_kind not in TABLE_CANDIDATES:
         raise ValueError(f"Unsupported table kind: {table_kind}")
     root = directory.expanduser().resolve()
     known = [root / name for name in TABLE_CANDIDATES[table_kind] if (root / name).is_file()]
+    if table_kind == "well_logs":
+        las_files = sorted(
+            {
+                *root.glob("*.las"),
+                *root.glob("*.LAS"),
+                *root.glob("wells/*.las"),
+                *root.glob("wells/*.LAS"),
+            },
+            key=lambda path: path.name.lower(),
+        )
+        if known:
+            return [*known, *las_files]
+        excluded = ("checkshot", "seismic", "gather", "manifest")
+        fallback = [
+            path
+            for path in root.glob("*.*")
+            if path.suffix.lower() in {".csv", ".parquet"}
+            and not any(marker in path.name.lower() for marker in excluded)
+        ]
+        table_files = sorted(
+            fallback,
+            key=lambda path: (path.suffix.lower() != ".parquet", path.name.lower()),
+        )
+        return [*table_files, *las_files]
     if known:
         return known
 
@@ -61,14 +85,52 @@ def find_table(directory: Path, table_kind: str) -> Path | None:
 
 
 def read_table(path: Path) -> pd.DataFrame:
-    """Read a local CSV or Parquet table and normalize basic depth/time types."""
+    """Read a local CSV, Parquet, or LAS table and normalize common curve names."""
     suffix = path.suffix.lower()
     if suffix == ".parquet":
         frame = pd.read_parquet(path)
     elif suffix == ".csv":
         frame = pd.read_csv(path)
+    elif suffix == ".las":
+        import lasio
+
+        las = lasio.read(str(path))
+        frame = las.df().reset_index()
+        aliases = {
+            "DEPT": "MD_M",
+            "DEPTH": "MD_M",
+            "MD": "MD_M",
+            "TVD": "TVD_M",
+            "TWT": "TWT_MS",
+            "DTC": "DTC_US_FT",
+            "DTS": "DTS_US_FT",
+            "RHOB": "RHOB_G_CC",
+            "GR": "GR_API",
+            "PHIT": "PHIT_VV",
+            "RT": "RT_OHM_M",
+            "SW": "SW_VV",
+            "CALI": "CALI_IN",
+            "DRHO": "DRHO_G_CC",
+            "PEF": "PEF_B_E",
+            "LITHCODE": "LITHOLOGY_CODE",
+            "FLUIDCODE": "FLUID_CODE",
+        }
+        frame.columns = [str(column).strip().upper() for column in frame.columns]
+        frame = frame.rename(columns=aliases)
+        frame["WELL_ID"] = str(las.well.WELL.value or path.stem).strip()
+        provenance = " ".join(str(item.value or "") for item in (las.well.COMP, las.well.PROV))
+        if "synthetic" in provenance.lower():
+            frame["SYNTHETIC_DATA"] = True
+        if "LITHOLOGY_CODE" in frame:
+            frame["SYNTHETIC_LITHOLOGY"] = frame["LITHOLOGY_CODE"].map(
+                {1: "shale", 2: "sand", 3: "tight"}
+            )
+        if "FLUID_CODE" in frame:
+            frame["SYNTHETIC_FLUID"] = frame["FLUID_CODE"].map(
+                {0: "not_applicable", 1: "brine", 2: "oil", 3: "gas"}
+            )
     else:
-        raise ValueError("Dashboard supports CSV and Parquet tables.")
+        raise ValueError("Dashboard supports CSV, Parquet, and LAS well-log files.")
 
     for column in ("MD_M", "TVD_M", "TWT_MS"):
         if column in frame:
