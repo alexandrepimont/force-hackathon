@@ -1,812 +1,1165 @@
-"""Interactive local dashboard for synthetic/authorized AVO input examples."""
+"""Poseidon AVO workflow: a step-by-step app from data to a calibrated well tie.
+
+Run:  .\\.venv\\Scripts\\streamlit.exe run dashboard\\app.py
+The previous free-form explorer (incl. the synthetic dataset) is kept in dashboard/legacy_explorer.py.
+"""
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
-from html import escape
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import yaml
 from plotly.subplots import make_subplots
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.dashboard_data import (  # noqa: E402
-    is_synthetic,
-    read_gather,
-    read_manifest,
-    read_reservoir_model,
-    read_table,
-    table_candidates,
+    build_seismic_cache,
+    find_seismic_stacks,
+    read_seismic_geometry,
+    read_seismic_section,
+    read_seismic_traces,
+    seismic_cache_ready,
+    survey_outline,
+    traverse_indices,
+    wells_on_grid,
 )
 
-st.set_page_config(
-    page_title="AVO Data Explorer",
-    page_icon="🪨",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+DASH = ROOT / "data" / "poseidon" / "dashboard"
+QC_LOGS = ROOT / "data" / "interim" / "poseidon_logs"
+TD_DIR = ROOT / "data" / "interim" / "poseidon_td"
+QC_DIR = ROOT / "outputs" / "well_qc"
+TIE_DIR = ROOT / "outputs" / "well_ties"
+CAL_PATH = ROOT / "configs" / "calibration.yaml"
+DECISION_LOG = ROOT / "outputs" / "decision_log.md"
 
+BLUE, GREEN, AMBER, RED, GREY = "#1f6feb", "#2da44e", "#bf8700", "#cf222e", "#6e7781"
+STACK_COLORS = {"near": "#1f77b4", "mid": "#2ca02c", "far": "#ff7f0e"}
+LITHO_COLORS = {"shale": "#a3a8ae", "tight": "#8e6cc9", "sand_low_phi": "#f2c94c", "sand_high_phi": "#e8833a",
+                "volcanic": "#3d3d3d", "unknown": "#ffffff"}
+LITHO_LABELS = {"shale": "Shale", "tight": "Tight", "sand_low_phi": "Sand, low porosity",
+                "sand_high_phi": "Sand, high porosity", "volcanic": "Volcanic", "unknown": "Unknown"}
+DEFAULT_TRAVERSE = ["Kronos-1", "Poseidon-2", "Boreas-1", "Poseidon-1", "Poseidon-North-1"]
+
+st.set_page_config(page_title="Poseidon AVO workflow", page_icon="🪨", layout="wide")
 st.markdown(
     """
     <style>
-            .stApp {
-                background: radial-gradient(
-                    ellipse at 12% 0%, #142d3a 0%, #0c1520 42%, #09111a 100%
-                );
-            }
-            [data-testid="stSidebar"] {
-                background: rgba(13, 25, 36, 0.96);
-                border-right: 1px solid #253a4a;
-            }
-            [data-testid="stMetric"] {
-                background: linear-gradient(
-                    145deg, rgba(28,48,64,.92), rgba(17,31,44,.92)
-                );
-                border: 1px solid #2a4355;
-                border-radius: 16px;
-                padding: 14px 18px;
-            }
-            [data-testid="stMetricLabel"] { color: #a9bdcb; }
-            .hero { padding: 8px 0 16px 0; }
-            .hero-kicker {
-                color: #51d6bd;
-                text-transform: uppercase;
-                letter-spacing: .16em;
-                font-size: .75rem;
-                font-weight: 700;
-            }
-            .hero h1 { margin: .25rem 0; font-size: 2.45rem; color: #eef6fb; }
-            .hero p { color: #a8bbc9; font-size: 1.05rem; margin-top: .2rem; }
-            .data-badge {
-                display: inline-block;
-                border-radius: 999px;
-                padding: 5px 12px;
-                background: #4a2d16;
-                color: #ffd08a;
-                border: 1px solid #98622b;
-                font-size: .8rem;
-                font-weight: 700;
-            }
-            .data-badge.real {
-                background: #123d36;
-                border-color: #268b75;
-                color: #8af0d5;
-            }
-            div[data-testid="stTabs"] button { color: #b7c8d4; }
-            div[data-testid="stTabs"] button[aria-selected="true"] {
-                color: #64e0ca;
-            }
+      .block-container {padding-top: 4.2rem; padding-bottom: 3rem; max-width: 1500px;}
+      .step-kicker {color:#1f6feb; font-weight:700; letter-spacing:.08em; font-size:.8rem; text-transform:uppercase;}
+      .chip {display:inline-block; padding:6px 12px; margin:3px 6px 3px 0; border-radius:999px; font-size:.85rem;
+             border:1px solid #d0d7de; background:#f6f8fa; color:#1f2933;}
+      .chip.done {background:#dafbe1; border-color:#4ac26b;}
+      .chip.attention {background:#fff8c5; border-color:#d4a72c;}
+      .chip.todo {background:#f6f8fa; color:#6e7781;}
+      div[data-testid="stMetricValue"] {font-size:1.5rem;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-@st.cache_data(show_spinner=False)
-def cached_table(path_string: str, modified_ns: int):
-    del modified_ns
-    return read_table(Path(path_string))
+# ----------------------------------------------------------------------------------------------- data access
+def _mtime(path: Path) -> int:
+    return path.stat().st_mtime_ns if path.exists() else 0
 
 
 @st.cache_data(show_spinner=False)
-def cached_manifest(directory_string: str, modified_ns: int):
-    del modified_ns
-    return read_manifest(Path(directory_string))
+def _csv(path: str, mtime: int) -> pd.DataFrame:
+    del mtime
+    return pd.read_csv(path)
 
 
 @st.cache_data(show_spinner=False)
-def cached_gather(path_string: str, modified_ns: int):
-    del modified_ns
-    return read_gather(Path(path_string))
+def _parquet(path: str, mtime: int) -> pd.DataFrame:
+    del mtime
+    return pd.read_parquet(path)
+
+
+def csv(path: Path) -> pd.DataFrame | None:
+    return _csv(str(path), _mtime(path)) if path.is_file() else None
+
+
+def wells() -> pd.DataFrame:
+    return csv(DASH / "wells.csv")
+
+
+def tops() -> pd.DataFrame:
+    return csv(DASH / "well_tops.csv")
+
+
+def qc_logs(well: str) -> pd.DataFrame | None:
+    path = QC_LOGS / f"{well}.parquet"
+    return _parquet(str(path), _mtime(path)) if path.is_file() else None
+
+
+def dashboard_logs() -> pd.DataFrame | None:
+    path = DASH / "well_logs.parquet"
+    return _parquet(str(path), _mtime(path)) if path.is_file() else None
 
 
 @st.cache_data(show_spinner=False)
-def cached_reservoir_model(path_string: str, modified_ns: int):
-    del modified_ns
-    return read_reservoir_model(Path(path_string))
+def _tie(well: str, mtime: int):
+    del mtime
+    with np.load(TIE_DIR / f"{well}.npz") as data:
+        return {key: data[key] for key in data.files}
+
+
+def tie(well: str):
+    path = TIE_DIR / f"{well}.npz"
+    return _tie(well, _mtime(path)) if path.is_file() else None
+
+
+def tie_meta(well: str):
+    path = TIE_DIR / f"{well}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def calibration():
+    return yaml.safe_load(CAL_PATH.read_text()) if CAL_PATH.is_file() else None
+
+
+def g2_status() -> str | None:
+    if not DECISION_LOG.is_file():
+        return None
+    text = DECISION_LOG.read_text(encoding="utf-8")
+    return "PASS" if "**PASS**" in text else "FAIL" if "**FAIL**" in text else None
 
 
 @st.cache_data(show_spinner=False)
-def cached_local_csv(path_string: str, modified_ns: int):
-    del modified_ns
-    return pd.read_csv(Path(path_string))
+def _geometry(path: str, mtime: int):
+    del mtime
+    return read_seismic_geometry(Path(path))
 
 
-def _cached_file(path: Path):
-    return cached_table(str(path), path.stat().st_mtime_ns)
+@st.cache_data(show_spinner=False, max_entries=30)
+def _section(path: str, kind: str, value: float, mtime: int):
+    del mtime
+    return read_seismic_section(Path(path), kind, value)
 
 
-def _color_column(frame):
-    for column in ("SYNTHETIC_LITHOLOGY", "LITHOLOGY", "FACIES", "SYNTHETIC_FLUID"):
-        if column in frame:
-            return column
-    return None
+@st.cache_data(show_spinner=False, max_entries=12)
+def _traverse(path: str, mtime: int, points: tuple):
+    geometry = _geometry(path, mtime)
+    route = traverse_indices(list(points), geometry["ilines"], geometry["xlines"], geometry)
+    return route, read_seismic_traces(Path(path), route["i"], route["j"])
 
 
-def _depth_options(frame):
-    return [column for column in ("MD_M", "TVD_M") if column in frame]
+@st.cache_data(show_spinner=False)
+def _positions(path: str, mtime: int, wells_frame: pd.DataFrame):
+    return wells_on_grid(_geometry(path, mtime), wells_frame)
 
 
-def _label(column: str) -> str:
-    labels = {
-        "DTC_US_FT": "Compressional slowness (µs/ft)",
-        "DTS_US_FT": "Shear slowness (µs/ft)",
-        "RHOB_G_CC": "Bulk density (g/cc)",
-        "GR_API": "Gamma ray (API)",
-        "PHIT_VV": "Total porosity (fraction)",
-        "RT_OHM_M": "Deep resistivity (Ω·m)",
-        "CALI_IN": "Caliper (in)",
-        "DRHO_G_CC": "Density correction (g/cc)",
-        "PEF_B_E": "Photoelectric factor (barn/e)",
+def seismic():
+    """Ready stacks (cache built), geometry and well positions on the grid."""
+    stacks = find_seismic_stacks(DASH)
+    ready = {name: path for name, path in stacks.items() if seismic_cache_ready(path)}
+    if not ready:
+        return stacks, {}, None, None
+    first = next(iter(ready.values()))
+    geometry = _geometry(str(first), _mtime(first))
+    w = wells()
+    positions = _positions(str(first), _mtime(first), w[["WELL_ID", "X_M", "Y_M"]]) if w is not None else None
+    return stacks, ready, geometry, positions
+
+
+def section(ready, stack, kind, value):
+    path = ready[stack]
+    return _section(str(path), kind, value, _mtime(path))
+
+
+# ----------------------------------------------------------------------------------------------- status
+def step_status() -> dict[str, str]:
+    stacks = find_seismic_stacks(DASH)
+    data_ok = wells() is not None and len(stacks) == 3
+    qc_ok = (QC_DIR / "summary.csv").is_file()
+    tie_summary = csv(TIE_DIR / "summary.csv")
+    tie_state = "todo"
+    if tie_summary is not None:
+        review = tie_summary.get("needs_review", pd.Series(dtype=bool)).fillna(False).astype(bool).any()
+        tie_state = "attention" if review or g2_status() != "PASS" else "done"
+    cache_ok = all(seismic_cache_ready(p) for p in stacks.values()) and bool(stacks)
+    return {
+        "data": "done" if data_ok else "todo",
+        "logs": "done" if dashboard_logs() is not None else "todo",
+        "qc": "done" if qc_ok else "todo",
+        "seismic": "done" if cache_ok else ("attention" if stacks else "todo"),
+        "tie": tie_state,
+        "traverse": tie_state if tie_state != "todo" else ("done" if cache_ok else "todo"),
+        "rockphysics": "done" if qc_ok else "todo",
+        "next": "todo",
     }
-    return labels.get(column, column.replace("_", " ").title())
 
 
-with st.sidebar:
-    st.markdown("### Data source")
-    reservoir_examples = PROJECT_ROOT / "data" / "synthetic_reservoir"
-    legacy_examples = PROJECT_ROOT / "data" / "volve" / "examples"
-    default_directory = reservoir_examples if reservoir_examples.is_dir() else legacy_examples
-    directory_input = st.text_input("Local data folder", str(default_directory))
-    data_directory = Path(directory_input).expanduser()
-    if not data_directory.is_absolute():
-        data_directory = PROJECT_ROOT / data_directory
-    data_directory = data_directory.resolve()
-    well_candidates = table_candidates(data_directory, "well_logs")
-    checkshot_candidates = table_candidates(data_directory, "checkshot")
-    well_path = (
-        st.selectbox(
-            "Well-log table",
-            well_candidates,
-            format_func=lambda path: path.name,
-        )
-        if well_candidates
-        else None
-    )
-    checkshot_path = (
-        st.selectbox(
-            "Checkshot table (optional)",
-            checkshot_candidates,
-            format_func=lambda path: path.name,
-        )
-        if checkshot_candidates
-        else None
-    )
-    gather_candidates = sorted(data_directory.glob("*.npz"))
-    gather_path = (
-        st.selectbox(
-            "Angle gather (optional)",
-            gather_candidates,
-            format_func=lambda path: path.name,
-        )
-        if gather_candidates
-        else data_directory / "angle_gather_synthetic.npz"
-    )
-    reservoir_model_path = data_directory / "model" / "earth_model_synthetic.npz"
+STATUS_ICON = {"done": "✅", "attention": "⚠️", "todo": "⚪"}
 
-    st.caption(
-        "Use a folder containing a well-log CSV, Parquet, or LAS file. "
-        "Checkshot, gather, and reservoir model views are optional."
-    )
-    if well_path:
-        st.success(f"Well logs: {well_path.name}")
+
+# ----------------------------------------------------------------------------------------------- UI helpers
+def step_header(number, title, purpose, look_for=None):
+    step_nav(ORDER[number or 0], top=True)
+    st.markdown(f"<div class='step-kicker'>{'Step ' + str(number) if number else 'Start'}</div>",
+                unsafe_allow_html=True)
+    st.title(title)
+    st.markdown(purpose)
+    if look_for:
+        st.info("**What to look for:** " + look_for)
+
+
+def well_picker(options: list[str], key: str, label: str = "Well") -> str:
+    current = st.session_state.get("well")
+    if current not in options:
+        current = options[0]
+    choice = st.segmented_control(label, options, default=current, key=f"well_{key}")
+    choice = choice or current
+    st.session_state["well"] = choice
+    return choice
+
+
+ORDER = ["overview", "data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next"]
+NAV_LABELS = {"overview": "Overview", "data": "1 Data", "logs": "2 Well logs", "qc": "3 Well QC",
+              "seismic": "4 Seismic", "tie": "5 Well tie", "traverse": "6 Seismic through wells",
+              "rockphysics": "7 Rock physics", "next": "8 AVO classification"}
+
+
+def step_nav(current: str, top: bool = False):
+    """Back / next links so the workflow can be walked in both directions."""
+    i = ORDER.index(current)
+    if not top:
+        st.divider()
+    left, _, right = st.columns([1, 2, 1])
+    if i > 0:
+        left.page_link(PAGES[ORDER[i - 1]], label=f"Back: {NAV_LABELS[ORDER[i - 1]]}", icon="⬅️")
+    if i < len(ORDER) - 1:
+        right.page_link(PAGES[ORDER[i + 1]], label=f"Next: {NAV_LABELS[ORDER[i + 1]]}", icon="➡️")
+
+
+def style(fig, height, legend_below=True, **kw):
+    fig.update_layout(template="plotly_white", height=height, font={"size": 12},
+                      margin={"l": 60, "r": 30, "t": 50, "b": 70 if legend_below else 40},
+                      legend={"orientation": "h", "yanchor": "top", "y": -0.10, "x": 0} if legend_below else {},
+                      **kw)
+    return fig
+
+
+def spaced_labels(values, min_gap):
+    """Shift label positions so neighbouring labels are at least min_gap apart (input sorted)."""
+    out = []
+    for v in values:
+        out.append(v if not out else max(v, out[-1] + min_gap))
+    return out
+
+
+def run_script(script: str, label: str):
+    with st.status(f"Running {label}...", expanded=False) as status:
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=str(ROOT), capture_output=True,
+                                text=True, timeout=1800)
+        st.code((result.stdout or "")[-4000:] + (result.stderr or "")[-2000:], language="text")
+        if result.returncode == 0:
+            status.update(label=f"{label} finished", state="complete")
+            st.cache_data.clear()
+        else:
+            status.update(label=f"{label} failed (see output)", state="error")
+
+
+def basemap(geometry, positions, lines=(), highlight=False, height=380, title=None):
+    w = wells()
+    ox, oy = survey_outline(geometry)
+    fig = go.Figure(go.Scatter(x=ox, y=oy, mode="lines", fill="toself", name="Seismic area",
+                               fillcolor="rgba(31,111,235,0.18)" if highlight else "rgba(31,111,235,0.06)",
+                               line={"color": BLUE, "width": 1.5}, hoverinfo="skip"))
+    for x, y, label in lines:
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=label, line={"color": RED, "width": 4}))
+    selected = st.session_state.get("well")
+    inside_ids = set(positions.dropna(subset=["INLINE"])["WELL_ID"]) if positions is not None else set(w["WELL_ID"])
+    inside = w[w["WELL_ID"].isin(inside_ids)]
+    fig.add_trace(go.Scatter(
+        x=inside["X_M"], y=inside["Y_M"], mode="markers+text", text=inside["WELL_ID"], textposition="top center",
+        textfont={"size": 10}, name="Wells", hovertemplate="%{text}<extra></extra>",
+        marker={"size": [13 if n == selected else 9 for n in inside["WELL_ID"]],
+                "color": [RED if n == selected else "#24292f" for n in inside["WELL_ID"]]}))
+    pad = 1500
+    fig.update_xaxes(range=[ox.min() - pad, ox.max() + pad], showticklabels=False, title=None)
+    fig.update_yaxes(range=[oy.min() - pad, oy.max() + pad], showticklabels=False, scaleanchor="x", title=None)
+    style(fig, height, legend_below=False, showlegend=False,
+          title={"text": title or "Location", "font": {"size": 13}})
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 40, "b": 10})
+    return fig
+
+
+def seismic_heatmap(z, x, y, clip, colorscale, showscale, hover):
+    return go.Heatmap(x=x, y=y, z=np.round(z), zmin=-clip, zmax=clip, zmid=0, colorscale=colorscale,
+                      showscale=showscale, colorbar={"title": "Amp.", "len": 0.8}, hovertemplate=hover)
+
+
+def _step(n, max_points):
+    return max(1, int(np.ceil(n / max_points)))
+
+
+# ----------------------------------------------------------------------------------------------- pages
+def page_overview():
+    step_header(None, "Poseidon AVO workflow",
+                "We want to map **rock type** (lithotype) and, where the data allow it, **fluid** in the Plover "
+                "reservoir of the Poseidon field in 3D, using the near, mid and far angle stacks calibrated to the "
+                "wells. This app walks through the workflow one step at a time. Use the menu on the left or the "
+                "*Next* link at the bottom of each page.")
+    status = step_status()
+    chips = [("1 Data", "data"), ("2 Well logs", "logs"), ("3 Well QC", "qc"), ("4 Seismic", "seismic"),
+             ("5 Well tie", "tie"), ("6 Seismic through wells", "traverse"), ("7 Rock physics", "rockphysics"),
+             ("8 AVO classification", "next")]
+    st.markdown("".join(f"<span class='chip {status[k]}'>{STATUS_ICON[status[k]]} {t}</span>" for t, k in chips),
+                unsafe_allow_html=True)
+    st.caption("✅ done · ⚠️ done, but something needs your review · ⚪ not started")
+
+    w = wells()
+    if w is None:
+        st.error("No well data found. Run the download and preparation scripts (see step 1).")
+        return
+    tie_summary = csv(TIE_DIR / "summary.csv")
+    stacks, ready, geometry, positions = seismic()
+    m = st.columns(5)
+    m[0].metric("Wells", len(w))
+    m[1].metric("Inside seismic", int(positions["INLINE"].notna().sum()) if positions is not None else 0)
+    m[2].metric("Seismic stacks", f"{len(ready)} / 3")
+    m[3].metric("Wells tied", int((tie_summary["status"] == "tied").sum()) if tie_summary is not None else 0)
+    g2 = g2_status()
+    m[4].metric("Gate G2 (tie)", g2 or "not run")
+
+    if geometry is not None:
+        left, right = st.columns([1.4, 1])
+        with left:
+            fig = basemap(geometry, positions, height=520, title="Wells and seismic area")
+            st.plotly_chart(fig, width="stretch", key="overview_map")
+        with right:
+            st.markdown("#### Well status")
+            table = w[["WELL_ID"]].rename(columns={"WELL_ID": "Well"})
+            table["In seismic"] = table["Well"].map(
+                lambda n: "yes" if positions is not None and n in set(positions.dropna(subset=["INLINE"])["WELL_ID"])
+                else "no")
+            if tie_summary is not None:
+                ts = tie_summary.set_index("well")
+                table["Tie"] = table["Well"].map(lambda n: _tie_label(ts, n))
+                table["Role"] = table["Well"].map(
+                    lambda n: "held out (blind)" if n in ts.index and str(ts.loc[n].get("held_out")) == "True"
+                    else ("training" if n in ts.index and ts.loc[n]["status"] == "tied" else "-"))
+            st.dataframe(table, hide_index=True, width="stretch", height=330)
+    step_nav("overview")
+
+
+def _tie_label(ts, name):
+    if name not in ts.index:
+        return "-"
+    r = ts.loc[name]
+    if r["status"] != "tied":
+        return "not tied"
+    return f"{'⚠️ review' if bool(r.get('needs_review')) else '✅ ok'} (r = {r['corr_after_mean']:.2f})"
+
+
+def page_data():
+    step_header(1, "Data",
+                "Everything starts with two data sets: **well logs** (what the rock is at the wells) and the "
+                "**near, mid and far angle stacks** (how the subsurface reflects at small, medium and large angles).",
+                "every well should have P-sonic, S-sonic and density in the reservoir; all three stacks should be "
+                "present with a display cache.")
+    w, logs = wells(), dashboard_logs()
+    stacks, ready, geometry, positions = seismic()
+    t = tops()
+    st.subheader("Wells")
+    if w is None or logs is None:
+        st.error("Run `scripts/download_poseidon_wells.py` and `scripts/prepare_poseidon_dashboard.py`.")
+        return
+    zone = logs[logs["TVDSS_M"] >= 4000]
+    rows = []
+    in_seismic = set(positions.dropna(subset=["INLINE"])["WELL_ID"]) if positions is not None else set()
+    for name in w["WELL_ID"]:
+        z = zone[zone["WELL_ID"] == name]
+
+        def has(col):
+            return "✅" if z[col].notna().mean() > 0.2 else "–"
+        rows.append({"Well": name, "Gamma ray": has("GR_API"), "Density": has("RHOB_G_CC"),
+                     "Neutron": has("NPHI_VV"), "P-sonic": has("DTC_US_FT"), "S-sonic": has("DTS_US_FT"),
+                     "Tops": int((t["WELL_ID"] == name).sum()) if t is not None else 0,
+                     "Own time-depth": "✅" if name in ("Kronos-1", "Pharos-1") else "–",
+                     "In seismic": "✅" if name in in_seismic else "–"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("Curves count as present when more than 20 % of the interval below 4000 m TVDSS has values. "
+               "Wells without their own time-depth curve borrow one from the nearest well in step 5.")
+
+    st.subheader("Seismic")
+    seis_cfg = yaml.safe_load((ROOT / "configs" / "poseidon_seismic.yaml").read_text())
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.dataframe(pd.DataFrame([{
+            "Stack": name, "Angles": f"{seis_cfg['stacks'][name]['angle_min']}–{seis_cfg['stacks'][name]['angle_max']}°",
+            "File": stacks[name].name if name in stacks else "missing",
+            "Fast display cache": "✅" if name in ready else ("build needed" if name in stacks else "–")}
+            for name in ("near", "mid", "far")]), hide_index=True, width="stretch")
+        st.markdown(
+            f"- **Area:** inlines {seis_cfg['geometry']['window']['inlines'][0]}–"
+            f"{seis_cfg['geometry']['window']['inlines'][1]}, crosslines "
+            f"{seis_cfg['geometry']['window']['crosslines'][0]}–{seis_cfg['geometry']['window']['crosslines'][1]}, "
+            f"{seis_cfg['geometry']['window']['twt_ms'][0]}–{seis_cfg['geometry']['window']['twt_ms'][1]} ms\n"
+            f"- **Polarity:** reverse (a trough is an increase in impedance)\n"
+            f"- **Coordinates:** {seis_cfg['crs']}\n"
+            "- **Amplitudes:** post-stack time-variant scaling is not documented, so each stack gets one global "
+            "scale from the training wells (step 5).")
+        missing = [n for n in stacks if n not in ready]
+        if missing and st.button(f"Build display cache for {', '.join(missing)} (about 1 minute each)"):
+            with st.spinner("Building cache..."):
+                for n in missing:
+                    build_seismic_cache(stacks[n])
+            st.cache_data.clear()
+            st.rerun()
+    with c2:
+        if geometry is not None:
+            st.plotly_chart(basemap(geometry, positions, height=360, title="Seismic area and wells"),
+                            width="stretch", key="data_map")
+    with st.expander("How to download or rebuild the data"):
+        st.code("\n".join([
+            r".\.venv\Scripts\python.exe scripts\download_poseidon_wells.py",
+            r".\.venv\Scripts\python.exe scripts\download_poseidon_seismic.py",
+            r".\.venv\Scripts\python.exe scripts\prepare_poseidon_dashboard.py"]), language="powershell")
+    step_nav("data")
+
+
+def page_logs():
+    step_header(2, "Well logs",
+                "The logs tell us what the rock is: **gamma ray** separates sand from shale, **density** and "
+                "**neutron** show porosity and gas, and **Vp, Vs** give the elastic properties that seismic "
+                "responds to. The right-hand column shows the rock type from the well QC (step 3).",
+                "low gamma ray + low density + low Vp/Vs together usually means porous, possibly gas-bearing sand.")
+    w = wells()
+    if w is None:
+        st.error("No wells found.")
+        return
+    well = well_picker(list(w["WELL_ID"]), "logs")
+    frame = qc_logs(well)
+    if frame is None:
+        st.warning("Well QC has not been run yet, showing the raw prepared logs.")
+        d = dashboard_logs()
+        d = d[d["WELL_ID"] == well].rename(columns={"TVDSS_M": "tvdss", "GR_API": "gr", "RHOB_G_CC": "rho",
+                                                    "NPHI_VV": "nphi", "VP_M_S": "vp", "VS_M_S": "vs"})
+        frame = d.assign(lithotype="unknown")
+    zmin, zmax = float(np.nanmin(frame["tvdss"])), float(np.nanmax(frame["tvdss"]))
+    depth = st.slider("Depth interval (m TVDSS)", zmin, zmax, (max(zmin, 3500.0), zmax), 10.0, key=f"logs_depth_{well}")
+    d = frame[frame["tvdss"].between(*depth)]
+    well_tops = tops()
+    well_tops = well_tops[(well_tops["WELL_ID"] == well) & well_tops["TVDSS_M"].between(*depth)].sort_values("TVDSS_M")
+    st.plotly_chart(log_figure(d, well_tops), width="stretch", key=f"logs_fig_{well}")
+    st.caption("Depth is TVDSS assuming vertical wells (no deviation surveys available; error < 16 m at TD). "
+               "Dashed lines are formation tops.")
+    step_nav("logs")
+
+
+def log_figure(d, well_tops, height=760):
+    tracks = [("Gamma ray (API)", [("gr", "#2da44e", None)], (0, 200)),
+              ("Density (g/cc)", [("rho", "#cf222e", None)], (1.95, 2.95)),
+              ("Neutron (v/v)", [("nphi", "#1f6feb", None)], (0.45, -0.05)),
+              ("Velocity (m/s)", [("vp", "#1f6feb", "Vp"), ("vs", "#8250df", "Vs")], (1000, 6500)),
+              ("Acoustic impedance", [("ai", "#bf8700", None)], None),
+              ("Vp/Vs", [("vpvs", "#0a7b83", None)], (1.3, 2.6))]
+    d = d.assign(ai=d["vp"] * d["rho"], vpvs=d["vp"] / d["vs"])
+    n = len(tracks) + 2
+    fig = make_subplots(rows=1, cols=n, shared_yaxes=True, horizontal_spacing=0.012,
+                        column_widths=[1] * len(tracks) + [0.35, 0.9],
+                        subplot_titles=[t[0] for t in tracks] + ["Rock", "Tops"])
+    for col, (_, curves, rng) in enumerate(tracks, start=1):
+        for name, color, label in curves:
+            if name in d and d[name].notna().any():
+                fig.add_trace(go.Scatter(x=d[name], y=d["tvdss"], mode="lines", line={"color": color, "width": 1},
+                                           name=label or name, showlegend=bool(label),
+                                           hovertemplate=f"{label or name} %{{x:.3g}}<br>%{{y:.0f}} m<extra></extra>"),
+                              1, col)
+        if rng:
+            fig.update_xaxes(range=list(rng), row=1, col=col)
+    if "lithotype" in d:
+        codes = {k: i for i, k in enumerate(LITHO_COLORS)}
+        z = d["lithotype"].map(codes).fillna(codes["unknown"]).to_numpy()[:, None]
+        scale = []
+        for i, color in enumerate(LITHO_COLORS.values()):
+            scale += [[i / len(LITHO_COLORS), color], [(i + 1) / len(LITHO_COLORS), color]]
+        fig.add_trace(go.Heatmap(z=z, y=d["tvdss"], x=[0], colorscale=scale, zmin=-0.5,
+                                 zmax=len(LITHO_COLORS) - 0.5, showscale=False,
+                                 customdata=d["lithotype"].map(LITHO_LABELS).to_numpy()[:, None],
+                                 hovertemplate="%{customdata}<br>%{y:.0f} m<extra></extra>"), 1, n - 1)
+        for label, color in LITHO_COLORS.items():
+            if label != "unknown" and (d["lithotype"] == label).any():
+                fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=LITHO_LABELS[label],
+                                         marker={"size": 12, "symbol": "square", "color": color}), 1, n - 1)
+    fig.update_xaxes(showticklabels=False, row=1, col=n - 1)
+    if len(well_tops):
+        span = float(d["tvdss"].max() - d["tvdss"].min()) or 1.0
+        label_y = spaced_labels(list(well_tops["TVDSS_M"]), span / 38)
+        for (_, top), y in zip(well_tops.iterrows(), label_y):
+            for col in range(1, n):
+                fig.add_hline(y=top["TVDSS_M"], line={"color": "#57606a", "width": 0.8, "dash": "dash"}, row=1, col=col)
+            fig.add_trace(go.Scatter(x=[0, 0.12], y=[top["TVDSS_M"], y], mode="lines", line={"color": "#8c959f", "width": 0.8},
+                                     showlegend=False, hoverinfo="skip"), 1, n)
+            fig.add_trace(go.Scatter(x=[0.14], y=[y], mode="text", text=[top["SURFACE"].replace(" Formation", "")],
+                                     textposition="middle right", textfont={"size": 10}, showlegend=False,
+                                     hoverinfo="skip"), 1, n)
+        fig.update_xaxes(range=[0, 1], showticklabels=False, showgrid=False, zeroline=False, row=1, col=n)
+    fig.update_yaxes(autorange="reversed", title_text="TVDSS (m)", row=1, col=1)
+    style(fig, height)
+    fig.update_annotations(font_size=11)
+    return fig
+
+
+def page_qc():
+    step_header(3, "Well QC and petrophysics",
+                "Before logs can be trusted for a well tie, we check them: **bad hole** (washouts) is flagged, "
+                "**shale volume**, **porosity** and **water saturation** are computed, and every sample gets a "
+                "**rock type** (a petrophysical scenario, not ground truth). Fluid is *not* labelled from logs; only "
+                "a gas indicator is stored.",
+                "few flagged samples in the reservoir, sensible porosities (sands 0.08–0.25) and whether S-wave "
+                "velocity is measured or estimated.")
+    c = st.columns([1, 3])
+    if c[0].button("Run well QC", type="primary", help="scripts/run_well_qc.py, ~20 s"):
+        run_script("run_well_qc.py", "well QC")
+    c[1].caption("Parameters: `configs/petrophysics.yaml` (cut-offs, Archie, held-out wells).")
+    summary = csv(QC_DIR / "summary.csv")
+    if summary is None:
+        st.warning("Well QC has not been run yet.")
+        return
+    table = summary.rename(columns={
+        "well": "Well", "flagged_fraction_zone": "Flagged", "gross_m": "Gross (m)", "net_sand_m": "Net sand (m)",
+        "net_to_gross": "N/G", "mean_phi_net": "Porosity", "mean_sw_net": "Sw", "gas_indicated_m": "Gas indicated (m)",
+        "vs_measured_fraction_res": "Vs measured", "held_out": "Held out"})
+    cols = ["Well", "Held out", "Flagged", "Gross (m)", "Net sand (m)", "N/G", "Porosity", "Sw", "Gas indicated (m)",
+            "Vs measured"]
+    st.dataframe(table[cols], hide_index=True, width="stretch", column_config={
+        "Flagged": st.column_config.ProgressColumn("Flagged (zone)", format="percent", min_value=0, max_value=0.2),
+        "Vs measured": st.column_config.ProgressColumn("Vs measured (reservoir)", format="percent", min_value=0,
+                                                       max_value=1),
+        "N/G": st.column_config.NumberColumn(format="%.2f"), "Porosity": st.column_config.NumberColumn(format="%.3f"),
+        "Sw": st.column_config.NumberColumn(format="%.2f")})
+    st.caption("Reservoir = Plover top to Nome (or TD). Empty rows: no formation tops for that well yet.")
+
+    well = well_picker(list(summary["well"]), "qc")
+    row = summary[summary["well"] == well].iloc[0]
+    m = st.columns(5)
+    m[0].metric("Net sand", f"{row['net_sand_m']:.0f} m" if pd.notna(row.get("net_sand_m")) else "–")
+    m[1].metric("Net-to-gross", f"{row['net_to_gross']:.2f}" if pd.notna(row.get("net_to_gross")) else "–")
+    m[2].metric("Mean porosity", f"{row['mean_phi_net']:.3f}" if pd.notna(row.get("mean_phi_net")) else "–")
+    m[3].metric("Flagged (zone)", f"{row['flagged_fraction_zone']:.1%}")
+    m[4].metric("Max depth error", f"{row['tvdss_max_error_m']:.0f} m", help="Vertical-well assumption, at TD")
+    image = QC_DIR / f"{well}.png"
+    if image.is_file():
+        st.image(str(image), width="stretch")
+    meta_path = QC_LOGS / f"{well}.meta.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        with st.expander("Where every curve comes from (provenance)"):
+            prov = pd.DataFrame(meta["provenance"]["curves"]).T.reset_index().rename(columns={"index": "curve"})
+            st.dataframe(prov.astype(str), hide_index=True, width="stretch")
+            st.caption(f"Source file: {meta['provenance']['file']}")
+    step_nav("qc")
+
+
+@st.fragment
+def page_seismic():
+    step_header(4, "Seismic",
+                "Browse the near, mid and far stacks. The **map** on the right always shows where the section is. "
+                "Showing all three stacks on one colour scale lets you see how amplitudes change with angle (AVO).",
+                "the strong events around 3.1–3.3 s (top Plover reservoir) and how their brightness changes from near "
+                "to far.")
+    stacks, ready, geometry, positions = seismic()
+    if not ready:
+        st.warning("The seismic display cache is missing. Build it in step 1.")
+        return
+    ilines, xlines, samples = geometry["ilines"], geometry["xlines"], geometry["samples"]
+    pos = positions.dropna(subset=["INLINE"])
+    c = st.columns([1.3, 1.3, 1])
+    view = c[0].segmented_control("View", ["Inline", "Crossline", "Time slice", "3D"], default="Inline", key="seis_view")
+    view = view or "Inline"
+    stack = c[1].segmented_control("Stack", ["near", "mid", "far", "all three"], default="near", key="seis_stack")
+    stack = stack or "near"
+    well = c[2].selectbox("Centre on well", list(pos["WELL_ID"]),
+                          index=list(pos["WELL_ID"]).index(st.session_state["well"])
+                          if st.session_state.get("well") in list(pos["WELL_ID"]) else 0, key="seis_well")
+    st.session_state["well"] = well
+    wrow = pos[pos["WELL_ID"] == well].iloc[0]
+    with st.expander("Display settings"):
+        s = st.columns(3)
+        clip_pct = s[0].slider("Contrast (clip percentile)", 90.0, 99.9, 98.0, 0.1, key="seis_clip")
+        colorscale = s[1].selectbox("Colours", ["RdBu_r", "Greys"], key="seis_cmap")
+        proj = s[2].slider("Show wells within (lines)", 0, 200, 30, 5, key="seis_proj")
+    names = ["near", "mid", "far"] if stack == "all three" else [stack]
+    names = [n for n in names if n in ready]
+
+    if view == "3D":
+        render_3d(ready[names[0]], geometry, pos, samples, clip_pct, colorscale, int(wrow["INLINE"]),
+                  int(wrow["CROSSLINE"]))
+        step_nav("seismic")
+        return
+    if view == "Inline":
+        kind, value = "inline", st.slider("Inline", int(ilines[0]), int(ilines[-1]), int(wrow["INLINE"]),
+                                          key=f"seis_il_{well}")
+    elif view == "Crossline":
+        kind, value = "crossline", st.slider("Crossline", int(xlines[0]), int(xlines[-1]), int(wrow["CROSSLINE"]),
+                                             key=f"seis_xl_{well}")
     else:
-        st.warning("No supported well-log CSV, Parquet, or LAS file found in this folder.")
-
-if well_path is None:
-    st.markdown(
-        '<div class="hero"><div class="hero-kicker">AVO uncertainty workflow</div>'
-        "<h1>Local Data Explorer</h1>"
-        "<p>Inspect well-log, time-depth, QC, and seismic inputs.</p></div>",
-        unsafe_allow_html=True,
-    )
-    st.info("Select a local folder with a well-log CSV, Parquet, or LAS file in the sidebar.")
-    st.stop()
-
-try:
-    logs = _cached_file(well_path)
-except Exception as exc:
-    st.error(f"Could not read the selected well-log table ({type(exc).__name__}).")
-    st.stop()
-
-if logs.empty or "MD_M" not in logs:
-    st.error("The selected well-log table is empty or does not include MD_M depth values.")
-    st.stop()
-
-manifest = cached_manifest(
-    str(data_directory),
-    max(
-        (path.stat().st_mtime_ns for path in data_directory.glob("*manifest.json")),
-        default=0,
-    ),
-)
-synthetic = is_synthetic(logs, manifest)
-well_id = (
-    str(logs["WELL_ID"].dropna().iloc[0])
-    if "WELL_ID" in logs and logs["WELL_ID"].notna().any()
-    else "Local well"
-)
-selected_well_id = None
-logs_view = logs
-if "WELL_ID" in logs and logs["WELL_ID"].nunique(dropna=True) > 1:
-    well_ids = sorted(logs["WELL_ID"].dropna().astype(str).unique())
-    with st.sidebar:
-        selected_well_id = st.selectbox("Well", well_ids, index=0)
-    well_id = selected_well_id
-    logs_view = logs.loc[logs["WELL_ID"].astype(str) == selected_well_id].copy()
-
-depth_options = _depth_options(logs_view)
-if not depth_options:
-    depth_options = ["MD_M"]
-
-with st.sidebar:
-    st.markdown("### View controls")
-    depth_column = st.selectbox("Depth reference", depth_options, index=0)
-    min_depth = float(logs_view[depth_column].min())
-    max_depth = float(logs_view[depth_column].max())
-    depth_window = st.slider(
-        f"Depth window ({depth_column.replace('_', ' ').lower()})",
-        min_value=min_depth,
-        max_value=max_depth,
-        value=(min_depth, max_depth),
-        step=max((max_depth - min_depth) / 500.0, 0.01),
-        format="%.1f",
-    )
-
-filtered = logs_view.loc[logs_view[depth_column].between(*depth_window)].copy()
-if filtered.empty:
-    st.warning("No log samples fall inside the selected depth window.")
-    st.stop()
-
-badge_class = "real" if not synthetic else ""
-badge_text = (
-    "LOCAL DATA · VERIFY PROVENANCE" if not synthetic else "SYNTHETIC EXAMPLE · NOT FIELD DATA"
-)
-st.markdown(
-    f'<div class="hero"><div class="hero-kicker">Lithology · Fluids · Uncertainty</div>'
-    f"<h1>AVO Data Explorer</h1><p>{escape(well_id)} &nbsp; "
-    f'<span class="data-badge {badge_class}">{badge_text}</span></p></div>',
-    unsafe_allow_html=True,
-)
-
-if synthetic:
-    st.warning(
-        "Synthetic scenario for software testing only. It is not derived from or "
-        "representative of real Volve measurements."
-    )
-
-qc_count = (
-    int(filtered["QC_BAD_HOLE"].fillna(False).astype(bool).sum())
-    if "QC_BAD_HOLE" in filtered
-    else 0
-)
-missing_percent = float(filtered.isna().mean().mean() * 100.0)
-metric_columns = st.columns(4)
-metric_columns[0].metric("Samples in view", f"{len(filtered):,}")
-metric_columns[1].metric("Depth range", f"{depth_window[0]:,.1f}–{depth_window[1]:,.1f} m")
-metric_columns[2].metric(
-    "QC flagged", f"{qc_count:,}", help="Rows marked QC_BAD_HOLE in the source table."
-)
-metric_columns[3].metric("Missing values", f"{missing_percent:.2f}%")
-
-tabs = st.tabs(
-    [
-        "Well logs",
-        "Reservoir model",
-        "Rock-property crossplots",
-        "Seismic gather",
-        "Data preview",
-    ]
-)
-
-with tabs[1]:
-    st.subheader("Faulted reservoir conceptualization")
-    st.caption(
-        "Synthetic 3D structural model. Depth increases downward; local coordinates are metres."
-    )
-    if not reservoir_model_path.is_file():
-        st.info(
-            "No gridded synthetic reservoir model was found in the selected folder. "
-            "Choose the generated data/synthetic_reservoir directory to view maps and sections."
-        )
+        kind, value = "time", float(st.select_slider("Time slice (ms)", options=[float(t) for t in samples],
+                                                     value=3152.0, key="seis_t"))
+    if kind != "time":
+        tw = st.slider("Time window (ms)", float(samples[0]), float(samples[-1]), (2900.0, 3600.0), 4.0, key="seis_tw")
+    sections = {n: section(ready, n, kind, value) for n in names}
+    clip = max(float(np.percentile(np.abs(sections[names[0]]), clip_pct)), 1e-6)
+    left, right = st.columns([3, 1.1])
+    if kind == "time":
+        fig = make_subplots(rows=1, cols=len(names), shared_yaxes=True, horizontal_spacing=0.03,
+                            subplot_titles=[f"{n} stack" for n in names])
+        for col, n in enumerate(names, 1):
+            sx, sy = _step(len(xlines), 500), _step(len(ilines), 500)
+            fig.add_trace(seismic_heatmap(sections[n][::sy, ::sx], xlines[::sx], ilines[::sy], clip, colorscale,
+                                          col == len(names), "XL %{x}<br>IL %{y}<br>%{z:.0f}<extra></extra>"), 1, col)
+            fig.add_trace(go.Scatter(x=pos["CROSSLINE"], y=pos["INLINE"], mode="markers+text", text=pos["WELL_ID"],
+                                     textposition="top center", textfont={"size": 10, "color": "black"},
+                                     marker={"size": 8, "color": "#ffd33d", "line": {"color": "black", "width": 1}},
+                                     showlegend=False, hoverinfo="text"), 1, col)
+            fig.update_xaxes(title_text="Crossline", row=1, col=col)
+        fig.update_yaxes(title_text="Inline", row=1, col=1)
+        style(fig, 560 if len(names) == 1 else 480, legend_below=False)
+        lines = []
     else:
-        try:
-            reservoir_model = cached_reservoir_model(
-                str(reservoir_model_path), reservoir_model_path.stat().st_mtime_ns
-            )
-            wells_path = data_directory / "model" / "wells_synthetic.csv"
-            faults_path = data_directory / "model" / "faults_synthetic.csv"
-            if not wells_path.is_file() or not faults_path.is_file():
-                raise ValueError("The model folder is missing well locations or fault traces.")
-            wells_model = cached_local_csv(str(wells_path), wells_path.stat().st_mtime_ns)
-            faults_model = cached_local_csv(str(faults_path), faults_path.stat().st_mtime_ns)
-            x_coords = reservoir_model["x_m"]
-            y_coords = reservoir_model["y_m"]
-            z_coords = reservoir_model["z_m"]
-            top_reservoir = reservoir_model["horizon_Top_Reservoir_m"]
+        lateral = xlines if kind == "inline" else ilines
+        t_mask = (samples >= tw[0]) & (samples <= tw[1])
+        along, across = ("CROSSLINE", "INLINE") if kind == "inline" else ("INLINE", "CROSSLINE")
+        near = pos[(pos[across] - value).abs() <= proj]
+        fig = make_subplots(rows=len(names), cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                            subplot_titles=[f"{n} stack" for n in names])
+        for row, n in enumerate(names, 1):
+            sx = _step(len(lateral), 900)
+            fig.add_trace(seismic_heatmap(sections[n][::sx][:, t_mask].T, lateral[::sx], samples[t_mask], clip,
+                                          colorscale, row == 1,
+                                          f"{along.title()} %{{x}}<br>%{{y:.0f}} ms<br>%{{z:.0f}}<extra></extra>"),
+                          row, 1)
+            for _, wl in near.iterrows():
+                fig.add_vline(x=float(wl[along]), line={"color": "black", "width": 2 if wl["WELL_ID"] == well else 1},
+                              row=row, col=1)
+                if row == 1:
+                    fig.add_annotation(x=float(wl[along]), y=1.0, yref="y domain", yanchor="bottom", showarrow=False,
+                                       text=wl["WELL_ID"], font={"size": 10}, bgcolor="rgba(255,255,255,.85)")
+            fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=row, col=1)
+        fig.update_xaxes(title_text=along.title(), row=len(names), col=1)
+        style(fig, 560 if len(names) == 1 else 300 * len(names) + 60, legend_below=False)
+        i = int(np.searchsorted(ilines, value)) if kind == "inline" else None
+        j = int(np.searchsorted(xlines, value)) if kind == "crossline" else None
+        lines = [(geometry["cdp_x"][i, :], geometry["cdp_y"][i, :], f"Inline {value}")] if kind == "inline" else \
+            [(geometry["cdp_x"][:, j], geometry["cdp_y"][:, j], f"Crossline {value}")]
+    left.plotly_chart(fig, width="stretch", key="seis_fig")
+    right.plotly_chart(basemap(geometry, pos, lines, highlight=kind == "time",
+                               title=f"{view} {value:.0f}" + (" ms" if kind == "time" else "")),
+                       width="stretch", key="seis_map")
+    step_nav("seismic")
 
-            metric_columns = st.columns(4)
-            metric_columns[0].metric("Wells", f"{len(wells_model)}")
-            metric_columns[1].metric("Faults", f"{faults_model['FAULT_ID'].nunique()}")
-            metric_columns[2].metric(
-                "Formations", f"{len(np.unique(reservoir_model['formation']))}"
-            )
-            metric_columns[3].metric("Grid", f"{len(x_coords)} × {len(y_coords)} × {len(z_coords)}")
 
-            map_figure = go.Figure(
-                go.Contour(
-                    x=x_coords,
-                    y=y_coords,
-                    z=top_reservoir,
-                    colorscale="Viridis_r",
-                    contours={"showlabels": True, "labelfont": {"color": "white"}},
-                    colorbar={"title": "Depth (m)"},
-                    name="Top reservoir",
-                    hovertemplate="X %{x:.0f} m<br>Y %{y:.0f} m<br>Depth %{z:.1f} m<extra></extra>",
-                )
-            )
-            for fault_id, fault_points in faults_model.groupby("FAULT_ID"):
-                fault_points = fault_points.sort_values("Y_M")
-                map_figure.add_trace(
-                    go.Scatter(
-                        x=fault_points["X_M"],
-                        y=fault_points["Y_M"],
-                        mode="lines",
-                        name=f"Fault {fault_id}",
-                        line={"color": "#ff776e", "width": 3, "dash": "dash"},
-                        hovertemplate=(
-                            f"{fault_id}<br>X %{{x:.0f}} m<br>Y %{{y:.0f}} m<extra></extra>"
-                        ),
-                    )
-                )
-            map_figure.add_trace(
-                go.Scatter(
-                    x=wells_model["x_m"],
-                    y=wells_model["y_m"],
-                    mode="markers+text",
-                    text=wells_model["well_id"],
-                    textposition="top center",
-                    name="Wells",
-                    marker={
-                        "size": 11,
-                        "color": "#f7d56d",
-                        "line": {"color": "#172332", "width": 1},
-                    },
-                    hovertemplate="%{text}<br>X %{x:.0f} m<br>Y %{y:.0f} m<extra></extra>",
-                )
-            )
-            map_figure.update_layout(
-                title="Top-reservoir structure map",
-                xaxis_title="Local X (m)",
-                yaxis_title="Local Y (m)",
-                yaxis={"scaleanchor": "x", "scaleratio": 1},
-                template="plotly_dark",
-                height=520,
-                margin={"l": 30, "r": 20, "t": 55, "b": 45},
-            )
+def render_3d(path, geometry, pos, samples, clip_pct, colorscale, il0, xl0):
+    ilines, xlines = geometry["ilines"], geometry["xlines"]
+    c = st.columns(4)
+    il = c[0].slider("Inline", int(ilines[0]), int(ilines[-1]), il0, key="d3_il")
+    xl = c[1].slider("Crossline", int(xlines[0]), int(xlines[-1]), xl0, key="d3_xl")
+    t_slice = float(c[2].select_slider("Time slice (ms)", options=[float(t) for t in samples], value=3400.0, key="d3_t"))
+    vscale = c[3].slider("Vertical scale", 0.1, 2.0, 0.6, 0.05, key="d3_v")
+    mt = _mtime(path)
+    inl, xln, tsl = (_section(str(path), k, v, mt) for k, v in (("inline", il), ("crossline", xl), ("time", t_slice)))
+    clip = max(float(np.percentile(np.abs(inl), clip_pct)), 1e-6)
+    cx, cy = float(np.nanmean(geometry["cdp_x"])), float(np.nanmean(geometry["cdp_y"]))
+    i, j = int(np.searchsorted(ilines, il)), int(np.searchsorted(xlines, xl))
+    st_t = _step(len(samples), 160)
+    tt = samples[::st_t]
+    fig = go.Figure()
+    sj, si = _step(len(xlines), 220), _step(len(ilines), 220)
+    for xs, ys, vals in ((geometry["cdp_x"][i, ::sj], geometry["cdp_y"][i, ::sj], inl[::sj, ::st_t].T),
+                         (geometry["cdp_x"][::si, j], geometry["cdp_y"][::si, j], xln[::si, ::st_t].T)):
+        fig.add_trace(go.Surface(x=np.tile(xs - cx, (len(tt), 1)), y=np.tile(ys - cy, (len(tt), 1)),
+                                 z=-np.tile(tt[:, None], (1, len(xs))), surfacecolor=vals, colorscale=colorscale,
+                                 cmin=-clip, cmax=clip, showscale=False, hoverinfo="skip"))
+    si2, sj2 = _step(len(ilines), 200), _step(len(xlines), 200)
+    gx, gy = geometry["cdp_x"][::si2, ::sj2] - cx, geometry["cdp_y"][::si2, ::sj2] - cy
+    fig.add_trace(go.Surface(x=gx, y=gy, z=np.full(gx.shape, -t_slice), surfacecolor=tsl[::si2, ::sj2],
+                             colorscale=colorscale, cmin=-clip, cmax=clip, showscale=False, hoverinfo="skip"))
+    for _, w in pos.iterrows():
+        wi, wj = int(np.searchsorted(ilines, w["INLINE"])), int(np.searchsorted(xlines, w["CROSSLINE"]))
+        x0, y0 = geometry["cdp_x"][wi, wj] - cx, geometry["cdp_y"][wi, wj] - cy
+        selected = w["WELL_ID"] == st.session_state.get("well")
+        fig.add_trace(go.Scatter3d(x=[x0, x0], y=[y0, y0], z=[-samples[0], -samples[-1]], mode="lines",
+                                   line={"color": RED if selected else "#24292f", "width": 6}, name=w["WELL_ID"],
+                                   hoverinfo="name", showlegend=False))
+        fig.add_trace(go.Scatter3d(x=[x0], y=[y0], z=[-samples[0] + 30], mode="text", text=[w["WELL_ID"]],
+                                   textfont={"size": 11, "color": "#24292f"}, showlegend=False, hoverinfo="skip"))
+    dx = float(np.nanmax(geometry["cdp_x"]) - np.nanmin(geometry["cdp_x"]))
+    dy = float(np.nanmax(geometry["cdp_y"]) - np.nanmin(geometry["cdp_y"]))
+    mx = max(dx, dy)
+    fig.update_layout(template="plotly_white", height=680, margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                      scene={"aspectmode": "manual", "aspectratio": {"x": dx / mx, "y": dy / mx, "z": vscale},
+                             "xaxis_title": "East (m)", "yaxis_title": "North (m)", "zaxis_title": "-TWT (ms)",
+                             "camera": {"eye": {"x": -1.3, "y": -1.5, "z": 0.9}}})
+    left, right = st.columns([3, 1.1])
+    left.plotly_chart(fig, width="stretch", key="seis_3d")
+    right.plotly_chart(basemap(geometry, pos, [(geometry["cdp_x"][i, :], geometry["cdp_y"][i, :], "inline"),
+                                               (geometry["cdp_x"][:, j], geometry["cdp_y"][:, j], "crossline")],
+                               title=f"IL {il} · XL {xl} · {t_slice:.0f} ms"), width="stretch", key="seis_3d_map")
+    st.caption("Drag to rotate, scroll to zoom. Coordinates are metres from the centre of the seismic area.")
 
-            section_y = float(
-                st.slider(
-                    "Cross-section Y (m)",
-                    min_value=float(y_coords.min()),
-                    max_value=float(y_coords.max()),
-                    value=float(y_coords[len(y_coords) // 2]),
-                    step=float(np.diff(y_coords).mean()),
-                )
-            )
-            iy = int(np.argmin(np.abs(y_coords - section_y)))
-            section_formations = reservoir_model["formation"][:, iy, :]
-            formation_order = [
-                "Upper_Shale",
-                "Top_Seal",
-                "Reservoir_Sand",
-                "Basal_Shale",
-                "Tight_Carbonate",
-            ]
-            formation_colors = ["#586c86", "#8495a8", "#d8a34c", "#74889b", "#b67a5a"]
-            formation_codes = np.zeros(section_formations.shape, dtype=np.int8)
-            for code, formation_name in enumerate(formation_order):
-                formation_codes[section_formations == formation_name] = code
-            categorical_colors = []
-            for index, color in enumerate(formation_colors):
-                categorical_colors.extend([[index / 5.0, color], [(index + 1) / 5.0, color]])
-            section_figure = go.Figure(
-                go.Heatmap(
-                    x=x_coords,
-                    y=z_coords,
-                    z=formation_codes,
-                    zmin=-0.5,
-                    zmax=4.5,
-                    colorscale=categorical_colors,
-                    colorbar={
-                        "title": "Formation",
-                        "tickvals": list(range(len(formation_order))),
-                        "ticktext": formation_order,
-                    },
-                    hovertemplate="X %{x:.0f} m<br>Depth %{y:.1f} m<br>"
-                    "Formation code %{z}<extra></extra>",
-                )
-            )
-            horizon_styles = (
-                ("horizon_Upper_Shale_Base_m", "Upper shale base", "#c5d5e0"),
-                ("horizon_Top_Reservoir_m", "Top reservoir", "#fff0a6"),
-                ("horizon_Base_Reservoir_m", "Base reservoir", "#ffc271"),
-                ("horizon_Base_Basal_Shale_m", "Base basal shale", "#aadbd3"),
-            )
-            for horizon_key, horizon_name, color in horizon_styles:
-                section_figure.add_trace(
-                    go.Scatter(
-                        x=x_coords,
-                        y=reservoir_model[horizon_key][iy, :],
-                        mode="lines",
-                        name=horizon_name,
-                        line={"color": color, "width": 2},
-                    )
-                )
-            for fault_id, fault_points in faults_model.groupby("FAULT_ID"):
-                fault_points = fault_points.sort_values("Y_M")
-                fault_point = fault_points.iloc[
-                    int(np.argmin(np.abs(fault_points["Y_M"].to_numpy() - y_coords[iy])))
-                ]
-                section_figure.add_trace(
-                    go.Scatter(
-                        x=[fault_point["X_M"], fault_point["X_M"]],
-                        y=[float(z_coords.min()), float(z_coords.max())],
-                        mode="lines",
-                        name=f"Fault {fault_id}",
-                        line={"color": "#ff776e", "width": 2, "dash": "dash"},
-                    )
-                )
-            y_tolerance = float(np.diff(y_coords).mean()) / 2.0 + 1e-6
-            nearby_wells = wells_model.loc[(wells_model["y_m"] - y_coords[iy]).abs() <= y_tolerance]
-            for _, well in nearby_wells.iterrows():
-                section_figure.add_trace(
-                    go.Scatter(
-                        x=[well["x_m"], well["x_m"]],
-                        y=[float(z_coords.min()), float(z_coords.max())],
-                        mode="lines+text",
-                        text=[well["well_id"], ""],
-                        textposition="top center",
-                        name=well["well_id"],
-                        line={"color": "#f7d56d", "width": 2},
-                    )
-                )
-            section_figure.update_layout(
-                title=f"Formation cross-section at Y = {y_coords[iy]:.0f} m",
-                xaxis_title="Local X (m)",
-                yaxis_title="Depth (m)",
-                yaxis={"autorange": "reversed"},
-                template="plotly_dark",
-                height=520,
-                margin={"l": 45, "r": 20, "t": 55, "b": 45},
-            )
 
-            left_column, right_column = st.columns(2)
-            with left_column:
-                st.plotly_chart(map_figure, width="stretch")
-            with right_column:
-                st.plotly_chart(section_figure, width="stretch")
+def page_tie():
+    step_header(5, "Well tie",
+                "A **synthetic seismogram** is made from each well's logs (Vp, Vs, density → reflectivity at the near, "
+                "mid and far angles → convolved with a wavelet) and compared with the real seismic at the well. The "
+                "automated tie then finds the **time shift and stretch** that line them up, using the well's own "
+                "time-depth curve or, if it has none, the nearest well's. Wavelets and amplitude scales are estimated "
+                "on the training wells only; the two blind wells are kept out.",
+                "a high correlation after the tie, a small shift, and the same events in the synthetic and the "
+                "seismic. Wells marked ⚠️ need a manual look.")
+    c = st.columns([1, 3])
+    if c[0].button("Run automated well tie", type="primary", help="scripts/run_well_tie.py, 1–2 minutes"):
+        run_script("run_well_tie.py", "automated well tie")
+    c[1].caption("Parameters: `configs/well_tie.yaml`. Results: `outputs/well_ties/`.")
+    summary = csv(TIE_DIR / "summary.csv")
+    if summary is None:
+        st.warning("The well tie has not been run yet (run well QC first).")
+        return
+    g2 = g2_status()
+    cal = calibration()
+    if g2 == "PASS":
+        st.success(f"Gate G2 passed: the training wells tie with a mean correlation of "
+                   + ", ".join(f"{k} {v['mean_corr_training']:.2f}" for k, v in cal["stacks"].items()) + ".")
+    elif g2 == "FAIL":
+        st.error("Gate G2 failed: ties are not good enough to calibrate the seismic.")
 
-            model_3d = go.Figure()
-            surface_specs = (
-                ("horizon_Top_Reservoir_m", "Top reservoir", "#d8a34c", 0.85),
-                ("horizon_Base_Reservoir_m", "Base reservoir", "#df755d", 0.70),
-            )
-            x_mesh, y_mesh = np.meshgrid(x_coords, y_coords)
-            for horizon_key, horizon_name, color, opacity in surface_specs:
-                model_3d.add_trace(
-                    go.Surface(
-                        x=x_mesh,
-                        y=y_mesh,
-                        z=reservoir_model[horizon_key],
-                        name=horizon_name,
-                        colorscale=[[0, color], [1, color]],
-                        showscale=False,
-                        opacity=opacity,
-                        hovertemplate=f"{horizon_name}<br>X %{{x:.0f}} m<br>"
-                        "Y %{y:.0f} m<br>Depth %{z:.1f} m<extra></extra>",
-                    )
-                )
-            for fault_id, fault_points in faults_model.groupby("FAULT_ID"):
-                fault_points = fault_points.sort_values("Y_M")
-                fault_y = fault_points["Y_M"].to_numpy()
-                fault_x = fault_points["X_M"].to_numpy()
-                fault_z = np.linspace(float(z_coords.min()), float(z_coords.max()), 12)
-                plane_x = np.tile(fault_x, (len(fault_z), 1))
-                plane_y = np.tile(fault_y, (len(fault_z), 1))
-                plane_z = np.tile(fault_z[:, None], (1, len(fault_y)))
-                model_3d.add_trace(
-                    go.Surface(
-                        x=plane_x,
-                        y=plane_y,
-                        z=plane_z,
-                        name=f"Fault {fault_id}",
-                        colorscale=[[0, "#ff776e"], [1, "#ff776e"]],
-                        showscale=False,
-                        opacity=0.25,
-                        hovertemplate=f"Fault {fault_id}<br>X %{{x:.0f}} m<br>"
-                        "Y %{y:.0f} m<br>Depth %{z:.1f} m<extra></extra>",
-                    )
-                )
-            model_3d.add_trace(
-                go.Scatter3d(
-                    x=wells_model["x_m"],
-                    y=wells_model["y_m"],
-                    z=np.full(len(wells_model), float(z_coords.min())),
-                    mode="markers+text",
-                    text=wells_model["well_id"],
-                    textposition="top center",
-                    name="Wells",
-                    marker={"size": 5, "color": "#f7d56d"},
-                )
-            )
-            for _, well in wells_model.iterrows():
-                model_3d.add_trace(
-                    go.Scatter3d(
-                        x=[well["x_m"], well["x_m"]],
-                        y=[well["y_m"], well["y_m"]],
-                        z=[float(z_coords.min()), float(z_coords.max())],
-                        mode="lines",
-                        showlegend=False,
-                        line={"color": "#f7d56d", "width": 4},
-                    )
-                )
-            model_3d.update_layout(
-                title="3D reservoir horizons, faults, and well trajectories",
-                template="plotly_dark",
-                height=680,
-                scene={
-                    "xaxis_title": "Local X (m)",
-                    "yaxis_title": "Local Y (m)",
-                    "zaxis_title": "Depth (m)",
-                    "zaxis": {"autorange": "reversed"},
-                    "aspectmode": "manual",
-                    "aspectratio": {"x": 1, "y": 1, "z": 0.55},
-                },
-                margin={"l": 0, "r": 0, "t": 55, "b": 0},
-            )
-            st.plotly_chart(model_3d, width="stretch")
-            st.caption(
-                "The 3D view shows the reservoir top/base, schematic fault planes, and "
-                "vertical synthetic wells. The cross-section carries the formation labels."
-            )
-        except Exception as exc:
-            st.error(f"Could not render the local reservoir model ({type(exc).__name__}).")
+    tied = summary[summary["status"] == "tied"].copy()
+    overview = pd.DataFrame({
+        "Well": summary["well"],
+        "Status": summary.apply(lambda r: "⛔ " + str(r["status"]).replace("stopped: ", "") if r["status"] != "tied"
+                                else ("⚠️ review" if bool(r.get("needs_review")) else "✅ ok"), axis=1),
+        "Role": summary.apply(lambda r: "blind" if str(r.get("held_out")) == "True" else
+                              ("training" if r["status"] == "tied" else "-"), axis=1),
+        "Time-depth from": summary.apply(lambda r: "-" if r["status"] != "tied" or pd.isna(r.get("td_source")) else
+                                         (f"{r['td_source']} ({r['td_distance_km']:.1f} km)"
+                                          if str(r.get("td_transferred")) == "True" else "own VSP"), axis=1),
+        "Shift (ms)": pd.to_numeric(summary.get("shift_ms"), errors="coerce"),
+        "Stretch (%)": pd.to_numeric(summary.get("stretch_pct"), errors="coerce"),
+        "r before": pd.to_numeric(summary.get("corr_before_mean"), errors="coerce"),
+        "r after": pd.to_numeric(summary.get("corr_after_mean"), errors="coerce"),
+        "Why review": summary.get("qc_flags").fillna("").replace("ok", ""),
+    })
+    st.dataframe(overview, hide_index=True, width="stretch", column_config={
+        "r before": st.column_config.NumberColumn(format="%.2f"),
+        "r after": st.column_config.ProgressColumn("r after", format="%.2f", min_value=0, max_value=1)})
 
-with tabs[0]:
-    st.subheader("Well-log tracks")
-    available_curves = [
-        column
-        for column in (
-            "GR_API",
-            "DTC_US_FT",
-            "DTS_US_FT",
-            "RHOB_G_CC",
-            "PHIT_VV",
-            "RT_OHM_M",
-            "CALI_IN",
-            "DRHO_G_CC",
-            "PEF_B_E",
-        )
-        if column in filtered
-    ]
-    default_curves = [
-        column
-        for column in ("GR_API", "DTC_US_FT", "DTS_US_FT", "RHOB_G_CC", "PHIT_VV", "RT_OHM_M")
-        if column in available_curves
-    ]
-    selected_curves = st.multiselect(
-        "Curves to display",
-        available_curves,
-        default=default_curves,
-        format_func=_label,
-        key="log_curves",
-    )
-    if selected_curves:
-        figure = make_subplots(
-            rows=1,
-            cols=len(selected_curves),
-            shared_yaxes=True,
-            horizontal_spacing=min(0.06, 0.3 / len(selected_curves)),
-            subplot_titles=[_label(column) for column in selected_curves],
-        )
-        for index, column in enumerate(selected_curves, start=1):
-            figure.add_trace(
-                go.Scattergl(
-                    x=filtered[column],
-                    y=filtered[depth_column],
-                    mode="lines",
-                    line={"width": 1.3, "color": px.colors.qualitative.Set2[(index - 1) % 8]},
-                    name=_label(column),
-                    connectgaps=False,
-                    showlegend=False,
-                ),
-                row=1,
-                col=index,
-            )
-            figure.update_xaxes(
-                title_text=_label(column), row=1, col=index, showgrid=True, zeroline=False
-            )
-        figure.update_yaxes(
-            title_text="Depth (m)",
-            autorange="reversed",
-            row=1,
-            col=1,
-            gridcolor="rgba(180,205,220,.12)",
-        )
-        figure.update_layout(
-            template="plotly_dark",
-            height=650,
-            margin={"l": 45, "r": 20, "t": 75, "b": 60},
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(8,18,28,.5)",
-        )
-        st.plotly_chart(figure, width="stretch")
-    else:
-        st.info("Choose one or more curves above.")
+    well = well_picker(list(tied["well"]), "tie")
+    r = tied[tied["well"] == well].iloc[0]
+    data, meta = tie(well), tie_meta(well)
+    if str(r.get("qc_flags", "ok")) != "ok":
+        st.warning(f"**{well}** needs a manual look: {r['qc_flags']}.")
+    m = st.columns(5)
+    m[0].metric("Time-depth from", "own VSP" if str(r["td_transferred"]) != "True" else f"{r['td_source']}",
+                help=None if str(r["td_transferred"]) != "True" else f"{r['td_distance_km']:.1f} km away")
+    m[1].metric("Time shift", f"{r['shift_ms']:+.0f} ms", help=f"Allowed ±{r['max_shift_ms']:.0f} ms")
+    m[2].metric("Stretch", f"{r['stretch_pct']:+.1f} %")
+    m[3].metric("Correlation", f"{r['corr_after_mean']:.2f}", f"{r['corr_after_mean'] - r['corr_before_mean']:+.2f}")
+    m[4].metric("Role", "blind" if str(r["held_out"]) == "True" else "training")
+    tie_line_view(well, data, meta)
+    st.markdown("##### Synthetic vs seismic at the well")
+    st.plotly_chart(tie_figure(data, r), width="stretch", key=f"tie_fig_{well}")
+    st.caption("White/black = real seismic at the well (3×3 trace average). Dashed grey = synthetic with the "
+               "initial time-depth. Coloured = synthetic after the automated tie. Dotted lines = formation tops.")
 
-    label_column = _color_column(filtered)
-    if label_column:
-        st.subheader("Synthetic facies / fluid labels" if synthetic else "Source classification")
-        fig_labels = px.scatter(
-            filtered,
-            x=label_column,
-            y=depth_column,
-            color=label_column,
-            hover_data=[
-                column
-                for column in ("MD_M", "TWT_MS", "SYNTHETIC_FLUID", "QC_BAD_HOLE")
-                if column in filtered
-            ],
-            color_discrete_sequence=px.colors.qualitative.Set2,
-            template="plotly_dark",
-        )
-        fig_labels.update_traces(marker={"size": 5, "opacity": 0.75})
-        fig_labels.update_yaxes(autorange="reversed", title="Depth (m)")
-        fig_labels.update_layout(height=280, showlegend=True, paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_labels, width="stretch")
-
-with tabs[2]:
-    st.subheader("Elastic and petrophysical relationships")
-    left, right = st.columns(2)
-    color_column = _color_column(filtered)
+    left, right = st.columns([1.1, 1])
     with left:
-        if {"DTC_US_FT", "RHOB_G_CC"}.issubset(filtered.columns):
-            crossplot = px.scatter(
-                filtered,
-                x="DTC_US_FT",
-                y="RHOB_G_CC",
-                color=color_column,
-                hover_data=[
-                    column
-                    for column in ("MD_M", "TWT_MS", "SYNTHETIC_FLUID", "QC_BAD_HOLE")
-                    if column in filtered
-                ],
-                color_discrete_sequence=px.colors.qualitative.Set2,
-                template="plotly_dark",
-                title="Compressional slowness vs density",
-            )
-            crossplot.update_layout(
-                xaxis_title="DTC (µs/ft)",
-                yaxis_title="RHOB (g/cc)",
-                paper_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(crossplot, width="stretch")
-        else:
-            st.info("DTC_US_FT and RHOB_G_CC are required for this crossplot.")
+        st.markdown("##### Time-depth: before and after")
+        st.plotly_chart(td_figure(well, data), width="stretch", key=f"td_fig_{well}")
     with right:
-        if {"GR_API", "RT_OHM_M"}.issubset(filtered.columns):
-            petrophysics = px.scatter(
-                filtered,
-                x="RT_OHM_M",
-                y="GR_API",
-                color=color_column,
-                log_x=True,
-                hover_data=[
-                    column for column in ("MD_M", "TWT_MS", "SYNTHETIC_FLUID") if column in filtered
-                ],
-                color_discrete_sequence=px.colors.qualitative.Set2,
-                template="plotly_dark",
-                title="Gamma ray vs deep resistivity",
-            )
-            petrophysics.update_layout(
-                xaxis_title="RT (Ω·m, log scale)",
-                yaxis_title="GR (API)",
-                paper_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(petrophysics, width="stretch")
-        else:
-            st.info("GR_API and RT_OHM_M are required for this crossplot.")
+        st.markdown("##### What the automated tie changed")
+        stacks = [str(s) for s in data["stacks"]]
+        st.dataframe(pd.DataFrame({
+            "Stack": stacks,
+            "r before": [r[f"corr_before_{s}"] for s in stacks],
+            "r after": [r[f"corr_after_{s}"] for s in stacks],
+            "Wavelet": [f"{meta['wavelets'][s]['freq_hz']:.0f} Hz, {meta['wavelets'][s]['phase_deg']:+.0f}°"
+                        for s in stacks]}), hide_index=True, width="stretch",
+            column_config={"r before": st.column_config.NumberColumn(format="%.2f"),
+                           "r after": st.column_config.NumberColumn(format="%.2f")})
+        tdm = meta["time_depth"]
+        st.markdown(
+            f"- **Time-depth:** {'own checkshot-calibrated curve' if not tdm['transferred'] else 'borrowed from ' + tdm['donor'] + f' ({tdm['distance_km']} km away)'}\n"
+            f"- **Shift / stretch:** {r['shift_ms']:+.0f} ms (limit ±{r['max_shift_ms']:.0f}), {r['stretch_pct']:+.1f} %\n"
+            f"- **Seismic used:** {meta['trace_selection']}\n"
+            f"- **Logs:** {meta['log_conditioning']['interpolated_samples']} bad-hole/gap samples interpolated; "
+            f"Vs estimated for {meta['log_conditioning']['vs_estimated_fraction']:.0%} of the interval")
+        with st.expander("Technical details (raw)"):
+            st.json(meta)
+    with st.expander("Global calibration from the training wells"):
+        if cal:
+            st.dataframe(pd.DataFrame(cal["stacks"]).T.reset_index().rename(columns={"index": "stack"}),
+                         hide_index=True, width="stretch")
+            st.caption(f"Training: {', '.join(cal['training_wells'])}. Blind: {', '.join(cal['held_out_wells'])}. "
+                       f"Polarity check (mean r): {cal['polarity_check_mean_corr']}.")
+    step_nav("tie")
 
-    if checkshot_path:
-        checkshot = _cached_file(checkshot_path)
-        if selected_well_id is not None and "WELL_ID" in checkshot:
-            checkshot = checkshot.loc[checkshot["WELL_ID"].astype(str) == selected_well_id]
-        if {"TWT_MS", "TVD_M"}.issubset(checkshot.columns):
-            tie_figure = px.scatter(
-                checkshot,
-                x="TWT_MS",
-                y="TVD_M",
-                template="plotly_dark",
-                title="Checkshot time-depth tie",
-                hover_data=[column for column in ("MD_M", "WELL_ID") if column in checkshot],
-            )
-            tie_figure.update_yaxes(autorange="reversed", title="TVD (m)")
-            tie_figure.update_xaxes(title="Two-way travel time (ms)")
-            tie_figure.update_layout(height=360, paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(tie_figure, width="stretch")
 
-with tabs[3]:
-    st.subheader("Local angle gather")
-    st.caption(
-        "Amplitude is synthetic and dimensionless for the example gather; it is not field seismic."
-    )
-    if gather_path.is_file():
-        try:
-            gather = cached_gather(str(gather_path), gather_path.stat().st_mtime_ns)
-            trace_ids = [str(value) for value in gather["lateral_trace_id"]]
-            selected_trace = st.selectbox(
-                "Lateral trace", range(len(trace_ids)), format_func=lambda value: trace_ids[value]
-            )
-            amplitude = gather["amplitude"][:, :, selected_trace]
-            clip = max(float(np.nanpercentile(np.abs(amplitude), 99.0)), 1e-8)
-            hover_template = "TWT %{y:.1f} ms<br>Angle %{x:.0f}°<br>"
-            hover_template += "Amplitude %{z:.4f}<extra></extra>"
-            seismic_figure = go.Figure(
-                go.Heatmap(
-                    x=gather["incident_angle_deg"],
-                    y=gather["twt_ms"],
-                    z=amplitude,
-                    zmin=-clip,
-                    zmax=clip,
-                    zmid=0,
-                    colorscale="RdBu",
-                    colorbar={"title": "Amplitude"},
-                    hovertemplate=hover_template,
-                )
-            )
-            seismic_figure.update_yaxes(autorange="reversed", title="Two-way travel time (ms)")
-            seismic_figure.update_xaxes(title="Incident angle (°)")
-            seismic_figure.update_layout(
-                template="plotly_dark",
-                height=560,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(8,18,28,.5)",
-                margin={"l": 55, "r": 25, "t": 30, "b": 55},
-            )
-            st.plotly_chart(seismic_figure, width="stretch")
-            st.caption(
-                f"Array: {gather['amplitude'].shape[0]} time samples × "
-                f"{gather['amplitude'].shape[1]} angles × {gather['amplitude'].shape[2]} traces."
-            )
-        except Exception as exc:
-            st.error(f"Could not read the local angle gather ({type(exc).__name__}).")
+@st.fragment
+def tie_line_view(well, data, meta):
+    """Seismic line through the well with the tie switched on or off."""
+    st.markdown("##### The tie on a seismic line")
+    stacks, ready, geometry, positions = seismic()
+    if not ready:
+        st.info("Build the seismic display cache (step 1) to see the tie on a seismic line.")
+        return
+    pos = positions.dropna(subset=["INLINE"]).set_index("WELL_ID")
+    if well not in pos.index:
+        return
+    samples, ilines, xlines = geometry["samples"], geometry["ilines"], geometry["xlines"]
+    others = [w for w in pos.index if w != well]
+    c = st.columns([1.6, 1.1, 1.3, 1.3])
+    line = c[0].segmented_control("Line through the well", ["Inline", "Crossline", "To another well"],
+                                  default="Inline", key=f"tl_line_{well}") or "Inline"
+    stack = c[1].segmented_control("Stack", [s for s in ("near", "mid", "far") if s in ready], default="near",
+                                   key=f"tl_stack_{well}") or "near"
+    mode = c[2].segmented_control("Well tie", ["Off", "On", "Before | after"], default="Before | after",
+                                  key=f"tl_mode_{well}") or "Before | after"
+    other = c[3].selectbox("Other well", others, key=f"tl_other_{well}", disabled=line != "To another well")
+    il, xl = float(pos.loc[well, "INLINE"]), float(pos.loc[well, "CROSSLINE"])
+    half = 120
+    if line == "Inline":
+        sec = section(ready, stack, "inline", il)
+        j0 = int(np.searchsorted(xlines, xl))
+        lo_i, hi_i = max(j0 - half, 0), min(j0 + half, len(xlines) - 1)
+        x_axis, traces, well_x = xlines[lo_i:hi_i + 1], sec[lo_i:hi_i + 1], float(xl)
+        x_title = "Crossline"
+        lines = [(geometry["cdp_x"][int(np.searchsorted(ilines, il)), lo_i:hi_i + 1],
+                  geometry["cdp_y"][int(np.searchsorted(ilines, il)), lo_i:hi_i + 1], "line")]
+    elif line == "Crossline":
+        sec = section(ready, stack, "crossline", xl)
+        i0 = int(np.searchsorted(ilines, il))
+        lo_i, hi_i = max(i0 - half, 0), min(i0 + half, len(ilines) - 1)
+        x_axis, traces, well_x = ilines[lo_i:hi_i + 1], sec[lo_i:hi_i + 1], float(il)
+        x_title = "Inline"
+        lines = [(geometry["cdp_x"][lo_i:hi_i + 1, int(np.searchsorted(xlines, xl))],
+                  geometry["cdp_y"][lo_i:hi_i + 1, int(np.searchsorted(xlines, xl))], "line")]
     else:
-        st.info("No supported local angle-gather NPZ file was found in the selected folder.")
+        il2, xl2 = float(pos.loc[other, "INLINE"]), float(pos.loc[other, "CROSSLINE"])
+        back = (float(np.clip(il - 0.25 * (il2 - il), ilines[0], ilines[-1])),
+                float(np.clip(xl - 0.25 * (xl2 - xl), xlines[0], xlines[-1])))
+        points = (back, (il, xl), (il2, xl2))
+        route, traces = _traverse(str(ready[stack]), _mtime(ready[stack]), points)
+        x_axis = route["distance_m"] / 1000
+        well_x, x_title = float(x_axis[route["vertex"][1]]), f"Distance along the line towards {other} (km)"
+        lines = [(route["x"], route["y"], "line")]
 
-with tabs[4]:
-    st.subheader("Filtered source table")
-    st.caption(f"Showing {len(filtered):,} rows from {well_path.name}.")
-    st.dataframe(filtered, width="stretch", height=440)
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download current depth window as CSV",
-        data=csv_bytes,
-        file_name="avo_dashboard_depth_window.csv",
-        mime="text/csv",
-    )
-    st.markdown("#### Provenance")
-    if manifest:
-        st.json({key: value for key, value in manifest.items() if key not in {"assets"}})
+    tie_meta_ = meta["auto_tie"]
+    shift, stretch, tc = tie_meta_["shift_s"] * 1000, tie_meta_["stretch"], tie_meta_["tc"] * 1000
+    tops_after = np.asarray(data["tops_twt_ms"], dtype=float)
+    tops_before = (tops_after - shift - tc) / (1 + stretch) + tc
+    t_lo = max(float(min(data["log_twt_initial_ms"].min(), data["log_twt_ms"].min())) - 120, float(samples[0]))
+    t_hi = min(float(max(data["log_twt_initial_ms"].max(), data["log_twt_ms"].max())) + 120, float(samples[-1]))
+    t_mask = (samples >= t_lo) & (samples <= t_hi)
+    clip = max(float(np.percentile(np.abs(traces[:, t_mask]), 98)), 1e-6)
+    k = [str(s) for s in data["stacks"]].index(stack)
+    span = float(x_axis[-1] - x_axis[0]) if len(x_axis) > 1 else 1.0
+    width = 0.06 * abs(span)
+    states = {"Off": [False], "On": [True], "Before | after": [False, True]}[mode]
+    titles = ["Without well tie (initial time-depth)" if not s else "With automated well tie" for s in states]
+    fig = make_subplots(rows=1, cols=len(states), shared_yaxes=True, horizontal_spacing=0.04, subplot_titles=titles)
+    ai = data["ai"]
+    ai_norm = (ai - np.nanmean(ai)) / (np.nanstd(ai) or 1.0)
+    for col, applied in enumerate(states, 1):
+        fig.add_trace(seismic_heatmap(traces[:, t_mask].T, x_axis, samples[t_mask], clip, "RdBu_r", col == len(states),
+                                      f"{x_title.split(' (')[0]} %{{x}}<br>%{{y:.0f}} ms<br>%{{z:.0f}}<extra></extra>"),
+                      1, col)
+        log_t = data["log_twt_ms"] if applied else data["log_twt_initial_ms"]
+        fig.add_trace(go.Scatter(x=well_x - 3.2 * width + 0.7 * width * np.clip(ai_norm, -2, 2), y=log_t,
+                                 mode="lines", line={"color": "#116329", "width": 1.6},
+                                 name="Acoustic impedance log (left of well)", showlegend=col == 1,
+                                 hoverinfo="skip"), 1, col)
+        syn = (data["syn_after"][k] if applied else data["syn_before"][k]) * data["scales"][k]
+        win = data["win_after"] if applied else data["win_before"]
+        syn_x = well_x + 1.2 * width + width * np.clip(syn[win] / clip, -1.5, 1.5)
+        fig.add_trace(go.Scatter(x=syn_x, y=data["t_ms"][win], mode="lines", line={"color": "black", "width": 5},
+                                 showlegend=False, hoverinfo="skip"), 1, col)
+        fig.add_trace(go.Scatter(x=syn_x, y=data["t_ms"][win], mode="lines", line={"color": "#ffd33d", "width": 2.5},
+                                 name="Synthetic (right of well)", showlegend=col == 1, hoverinfo="skip"), 1, col)
+        fig.add_vline(x=well_x, line={"color": "black", "width": 1.5}, row=1, col=col)
+        tt = tops_after if applied else tops_before
+        for n_top, (name, t) in enumerate(zip(data["tops_names"], tt)):
+            if t_lo <= t <= t_hi:
+                fig.add_trace(go.Scatter(x=[well_x - 4.2 * width, well_x + 3.2 * width], y=[t, t], mode="lines",
+                                         line={"color": "#24292f", "width": 2.5},
+                                         name="Formation tops (hover for name)",
+                                         legendgroup="tops", showlegend=col == 1 and n_top == 0,
+                                         hovertemplate=f"{name}<br>{t:.0f} ms<extra></extra>"), 1, col)
+        fig.update_xaxes(title_text=x_title, row=1, col=col)
+    fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=1, col=1)
+    style(fig, 600)
+    left, right = st.columns([3, 1])
+    left.plotly_chart(fig, width="stretch", key=f"tl_fig_{well}")
+    right.plotly_chart(basemap(geometry, positions.dropna(subset=["INLINE"]), lines, height=330,
+                               title=f"{line} through {well}"), width="stretch", key=f"tl_map_{well}")
+    right.markdown(f"**The tie moved this well by {shift:+.0f} ms** and stretched it {stretch * 100:+.1f} %. "
+                   "Compare where the yellow synthetic and the black top markers sit relative to the seismic "
+                   "events with the tie off and on.")
+
+
+def tie_figure(data, r, height=680):
+    t = data["t_ms"]
+    stacks = [str(s) for s in data["stacks"]]
+    lo = max(float(data["log_twt_ms"].min()) - 60, float(t[0]))
+    hi = min(float(data["log_twt_ms"].max()) + 40, float(t[-1]))
+    fig = make_subplots(rows=1, cols=3 + len(stacks), shared_yaxes=True, horizontal_spacing=0.015,
+                        column_widths=[0.8, 0.8] + [1] * len(stacks) + [0.7],
+                        subplot_titles=["Acoustic imp.", "Vp/Vs"] +
+                        [f"{s}  (r {r[f'corr_before_{s}']:.2f} → {r[f'corr_after_{s}']:.2f})" for s in stacks] + ["Tops"])
+    fig.add_trace(go.Scatter(x=data["ai"], y=data["log_twt_ms"], line={"color": "#bf8700", "width": 1},
+                             showlegend=False, hoverinfo="skip"), 1, 1)
+    fig.add_trace(go.Scatter(x=data["vpvs"], y=data["log_twt_ms"], line={"color": "#0a7b83", "width": 1},
+                             showlegend=False, hoverinfo="skip"), 1, 2)
+    win = data["win_after"]
+    for k, s in enumerate(stacks):
+        obs = data["obs"][k] / data["scales"][k]
+        norm = float(np.abs(obs[win]).max()) or 1.0
+        fig.add_trace(go.Scatter(x=obs / norm, y=t, line={"color": "#24292f", "width": 1.6}, name="Seismic",
+                                 showlegend=k == 0), 1, 3 + k)
+        fig.add_trace(go.Scatter(x=np.where(data["win_before"], data["syn_before"][k], np.nan) / norm, y=t,
+                                 line={"color": "#8c959f", "width": 1.2, "dash": "dash"}, name="Synthetic before",
+                                 showlegend=k == 0), 1, 3 + k)
+        fig.add_trace(go.Scatter(x=np.where(win, data["syn_after"][k], np.nan) / norm, y=t,
+                                 line={"color": STACK_COLORS.get(s, RED), "width": 2.4}, name="Synthetic after tie",
+                                 showlegend=k == 0), 1, 3 + k)
+        fig.update_xaxes(range=[-1.4, 1.4], showticklabels=False, row=1, col=3 + k)
+    names = [(float(tt), str(n)) for n, tt in zip(data["tops_names"], data["tops_twt_ms"]) if lo <= tt <= hi]
+    names.sort()
+    n_col = 3 + len(stacks)
+    label_y = spaced_labels([tt for tt, _ in names], (hi - lo) / 30)
+    for (tt, name), y in zip(names, label_y):
+        for col in range(1, n_col):
+            fig.add_hline(y=tt, line={"color": "#57606a", "width": 0.8, "dash": "dot"}, row=1, col=col)
+        fig.add_trace(go.Scatter(x=[0, 0.1], y=[tt, y], mode="lines", line={"color": "#8c959f", "width": 0.8},
+                                 showlegend=False, hoverinfo="skip"), 1, n_col)
+        fig.add_trace(go.Scatter(x=[0.12], y=[y], mode="text", text=[name.replace(" Formation", "")],
+                                 textposition="middle right", textfont={"size": 10}, showlegend=False,
+                                 hoverinfo="skip"), 1, n_col)
+    fig.update_xaxes(range=[0, 1], showticklabels=False, showgrid=False, zeroline=False, row=1, col=n_col)
+    fig.update_yaxes(range=[hi, lo], title_text="TWT (ms)", row=1, col=1)
+    style(fig, height)
+    fig.update_annotations(font_size=11)
+    return fig
+
+
+def td_figure(well, data):
+    td = csv(TD_DIR / f"{well}.csv")
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[1.4, 1], horizontal_spacing=0.05,
+                        subplot_titles=["TWT vs depth", "Change (ms)"])
+    if td is not None and "twt_final_ms" in td:
+        td = td.dropna(subset=["twt_initial_ms", "twt_final_ms"])
+        lo, hi = float(data["log_twt_ms"].min()) - 150, float(data["log_twt_ms"].max()) + 100
+        td = td[td["twt_final_ms"].between(lo, hi)]
+        fig.add_trace(go.Scatter(x=td["twt_initial_ms"], y=td["tvdss"], name="Before",
+                                 line={"color": "#8c959f", "dash": "dash"}), 1, 1)
+        fig.add_trace(go.Scatter(x=td["twt_final_ms"], y=td["tvdss"], name="After tie", line={"color": RED}), 1, 1)
+        fig.add_trace(go.Scatter(x=td["twt_final_ms"] - td["twt_initial_ms"], y=td["tvdss"], showlegend=False,
+                                 line={"color": RED}), 1, 2)
+    fig.update_yaxes(autorange="reversed", title_text="TVDSS (m)", row=1, col=1)
+    fig.update_xaxes(title_text="TWT (ms)", row=1, col=1)
+    style(fig, 400)
+    return fig
+
+
+@st.fragment
+def page_traverse():
+    step_header(6, "Seismic through the wells",
+                "A line through several wells shows how the tied wells fit the seismic between them. Yellow traces "
+                "are the tied synthetics at each well; dotted lines join the same formation top from well to well.",
+                "synthetics that match the seismic at every well, and tops that follow the same seismic event "
+                "between wells.")
+    stacks, ready, geometry, positions = seismic()
+    if not ready:
+        st.warning("The seismic display cache is missing. Build it in step 1.")
+        return
+    pos = positions.dropna(subset=["INLINE"])
+    samples = geometry["samples"]
+    choices = list(pos["WELL_ID"])
+    chosen = st.multiselect("Wells along the line, in order", choices,
+                            default=[w for w in DEFAULT_TRAVERSE if w in choices], key="trav_wells")
+    if len(chosen) < 2:
+        st.info("Choose at least two wells.")
+        return
+    c = st.columns([1.3, 2, 1, 1])
+    stack = c[0].segmented_control("Stack", ["near", "mid", "far", "all three"], default="near", key="trav_stack") or "near"
+    tw = c[1].slider("Time window (ms)", float(samples[0]), float(samples[-1]), (2950.0, 3450.0), 4.0, key="trav_tw")
+    show_syn = c[2].toggle("Synthetics", value=True, key="trav_syn")
+    show_tops = c[3].toggle("Tops", value=True, key="trav_tops")
+    with st.expander("Display settings"):
+        s = st.columns(2)
+        clip_pct = s[0].slider("Contrast (clip percentile)", 90.0, 99.9, 98.0, 0.1, key="trav_clip")
+        colorscale = s[1].selectbox("Colours", ["RdBu_r", "Greys"], key="trav_cmap")
+    names = ["near", "mid", "far"] if stack == "all three" else [stack]
+    rows = pos.set_index("WELL_ID").loc[chosen]
+    points = tuple((float(r.INLINE), float(r.CROSSLINE)) for r in rows.itertuples())
+    t_mask = (samples >= tw[0]) & (samples <= tw[1])
+    data = {n: _traverse(str(ready[n]), _mtime(ready[n]), points) for n in names}
+    route = data[names[0]][0]
+    dist = route["distance_m"] / 1000
+    well_x = dist[route["vertex"]]
+    clip = max(float(np.percentile(np.abs(data[names[0]][1][:, t_mask]), clip_pct)), 1e-6)
+    ties = {w: tie(w) for w in chosen}
+    fig = make_subplots(rows=len(names), cols=1, shared_xaxes=True, vertical_spacing=0.07,
+                        subplot_titles=[f"{n} stack" for n in names])
+    palette = ["#1f6feb", "#cf222e", "#2da44e", "#8250df", "#bf8700", "#0a7b83", "#e8833a", "#57606a", "#d63384"]
+    for row, n in enumerate(names, 1):
+        traces = data[n][1]
+        sx = _step(len(dist), 1000)
+        fig.add_trace(seismic_heatmap(traces[::sx][:, t_mask].T, dist[::sx], samples[t_mask], clip, colorscale,
+                                      row == 1, "%{x:.2f} km<br>%{y:.0f} ms<br>%{z:.0f}<extra></extra>"), row, 1)
+        k = ["near", "mid", "far"].index(n)
+        width = 0.035 * float(dist[-1])
+        surfaces = {}
+        for w, x in zip(chosen, well_x):
+            fig.add_vline(x=float(x), line={"color": "black", "width": 1}, row=row, col=1)
+            if row == 1:
+                fig.add_annotation(x=float(x), y=1.0, yref="y domain", yanchor="bottom", showarrow=False, text=w,
+                                   font={"size": 11}, bgcolor="rgba(255,255,255,.9)")
+            d = ties.get(w)
+            if d is None:
+                continue
+            if show_syn:
+                win = d["win_after"] & (d["t_ms"] >= tw[0]) & (d["t_ms"] <= tw[1])
+                syn = d["syn_after"][k] * d["scales"][k]
+                fig.add_trace(go.Scatter(x=x + width * np.clip(syn[win] / clip, -1.5, 1.5), y=d["t_ms"][win],
+                                         mode="lines", line={"color": "#ffd33d", "width": 2.5},
+                                         name="Synthetic (tied)", showlegend=False, hoverinfo="skip"), row, 1)
+            if show_tops:
+                for s_name, tt in zip(d["tops_names"], d["tops_twt_ms"]):
+                    if tw[0] <= tt <= tw[1]:
+                        surfaces.setdefault(str(s_name), []).append((float(x), float(tt)))
+        for idx, (surface, pts) in enumerate(sorted(surfaces.items(), key=lambda kv: min(p[1] for p in kv[1]))):
+            pts.sort()
+            fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines+markers",
+                                     line={"color": palette[idx % len(palette)], "width": 2, "dash": "dot"},
+                                     marker={"size": 7}, name=surface, showlegend=row == 1,
+                                     hovertemplate=f"{surface}<br>%{{y:.0f}} ms<extra></extra>"), row, 1)
+        fig.update_yaxes(autorange="reversed", title_text="TWT (ms)", row=row, col=1)
+    fig.update_xaxes(title_text="Distance along the line (km)", row=len(names), col=1)
+    style(fig, 520 if len(names) == 1 else 330 * len(names) + 80)
+    left, right = st.columns([3, 1.1])
+    left.plotly_chart(fig, width="stretch", key="trav_fig")
+    right.plotly_chart(basemap(geometry, pos, [(route["x"], route["y"], "line")], title="The line on the map"),
+                       width="stretch", key="trav_map")
+    untied = [w for w in chosen if ties.get(w) is None]
+    if untied:
+        st.caption(f"No tie available for: {', '.join(untied)}.")
+    step_nav("traverse")
+
+
+def page_rockphysics():
+    step_header(7, "Rock physics: what makes rocks look different",
+                "Every log sample from the Plover reservoir is plotted as **acoustic impedance** against **Vp/Vs**. "
+                "Porous sand moves left, shale moves up, gas moves down-left. Where the rock types overlap, the "
+                "seismic cannot tell them apart - that overlap is the uncertainty the AVO classification must report.",
+                "whether high-porosity sands (orange) separate from shale (grey) and tight rock (purple).")
+    w = wells()
+    frames = [qc_logs(n) for n in w["WELL_ID"]]
+    frames = [f for f in frames if f is not None]
+    if not frames:
+        st.warning("Run the well QC (step 3) first.")
+        return
+    d = pd.concat(frames, ignore_index=True)
+    d = d[d["formation"].astype(str).str.contains("Plover", na=False)].copy()
+    d["ai"], d["vpvs"] = d["vp"] * d["rho"], d["vp"] / d["vs"]
+    d = d.dropna(subset=["ai", "vpvs"])
+    c = st.columns([2, 1])
+    chosen = c[0].multiselect("Wells", sorted(d["well"].unique()), default=sorted(d["well"].unique()), key="rp_wells")
+    color_by = c[1].segmented_control("Colour by", ["Rock type", "Well", "Gas indicator"], default="Rock type",
+                                      key="rp_color") or "Rock type"
+    d = d[d["well"].isin(chosen) & ~d["flag_bad"]]
+    fig = go.Figure()
+    if color_by == "Rock type":
+        groups = [(LITHO_LABELS[k], d[d["lithotype"] == k], LITHO_COLORS[k]) for k in LITHO_COLORS if k != "unknown"]
+    elif color_by == "Well":
+        cols = ["#1f6feb", "#cf222e", "#2da44e", "#8250df", "#bf8700", "#0a7b83", "#e8833a", "#57606a"]
+        groups = [(n, d[d["well"] == n], cols[i % len(cols)]) for i, n in enumerate(sorted(d["well"].unique()))]
     else:
-        st.info(
-            "No manifest was found beside the selected table. Verify source and "
-            "usage terms before interpretation."
-        )
+        groups = [("Gas indicated", d[d["hc_indicator"] == "gas_indicated"], RED),
+                  ("Possible", d[d["hc_indicator"] == "possible"], AMBER),
+                  ("None / not sand", d[d["hc_indicator"].isin(["none", "not_applicable"])], "#a3a8ae")]
+    for label, g, color in groups:
+        if len(g):
+            fig.add_trace(go.Scatter(x=g["ai"], y=g["vpvs"], mode="markers", name=f"{label} ({len(g):,})",
+                                       marker={"size": 4, "color": color, "opacity": 0.6,
+                                               "line": {"width": 0.3, "color": "#57606a"}},
+                                       customdata=np.c_[g["well"], g["tvdss"].round(0)],
+                                       hovertemplate="%{customdata[0]}<br>%{customdata[1]} m<br>AI %{x:.0f}<br>"
+                                                     "Vp/Vs %{y:.2f}<extra></extra>"))
+    fig.update_xaxes(title_text="Acoustic impedance (m/s · g/cc)")
+    fig.update_yaxes(title_text="Vp/Vs", range=[1.35, 2.4])
+    style(fig, 620)
+    st.plotly_chart(fig, width="stretch", key="rp_fig")
+    st.caption(f"{len(d):,} good-hole samples from the Plover Formation. Rock types are the petrophysical scenario "
+               "from step 3.")
+    step_nav("rockphysics")
+
+
+def page_next():
+    step_header(8, "AVO classification (next)",
+                "With calibrated wells and seismic, the remaining steps build the actual prediction. They reuse the "
+                "workflow that was already tested end-to-end on a synthetic earth.")
+    items = [
+        ("4 Fluid sensitivity", "Gassmann: does gas vs brine change near/mid/far amplitudes more than the tie noise? "
+                                "Needs a gas fluid model at Plover pressure and temperature (gate G3)."),
+        ("5 Scenarios", "Thousands of pseudo-wells: porosity, thickness, clay, fluid varied around the QC'd wells."),
+        ("6 Forward modelling", "Synthetic near/mid/far for every scenario with the wavelets and scales from step 5."),
+        ("7 Classification", "Methods A (intercept-gradient), B (hand-picked scenarios), C (learned from wells)."),
+        ("8 Blind test", "Score once on Poseidon-2 and Boreas-1, which were kept out of everything (gate G4)."),
+        ("9 3D cubes", "Rock-type and fluid probabilities plus uncertainty for every trace in the reservoir window."),
+    ]
+    for title, text in items:
+        st.markdown(f"**{title}** – {text}")
+    st.info("Open items before starting: review the ⚠️ ties in step 5 (Poseidon-North-1, Proteus-1, Pharos-1) and "
+            "pick formation tops for Pharos-1 and Poseidon-North-1.")
+    step_nav("next")
+
+
+PAGES = {
+    "overview": st.Page(page_overview, title="Overview", icon="🏠", default=True, url_path="overview"),
+    "data": st.Page(page_data, title="1 · Data", icon="🗂️", url_path="data"),
+    "logs": st.Page(page_logs, title="2 · Well logs", icon="📈", url_path="logs"),
+    "qc": st.Page(page_qc, title="3 · Well QC", icon="🧪", url_path="qc"),
+    "seismic": st.Page(page_seismic, title="4 · Seismic", icon="🌊", url_path="seismic"),
+    "tie": st.Page(page_tie, title="5 · Well tie", icon="🔗", url_path="tie"),
+    "traverse": st.Page(page_traverse, title="6 · Seismic through wells", icon="🧭", url_path="traverse"),
+    "rockphysics": st.Page(page_rockphysics, title="7 · Rock physics", icon="🪨", url_path="rockphysics"),
+    "next": st.Page(page_next, title="8 · AVO classification", icon="🎯", url_path="next"),
+}
+
+if "well" not in st.session_state:
+    st.session_state["well"] = "Poseidon-1"
+status = step_status()
+with st.sidebar:
+    st.markdown("### Poseidon AVO")
+    st.caption("Plover reservoir · Browse Basin")
+navigation = st.navigation({
+    "Start": [PAGES["overview"]],
+    "Workflow": [PAGES[k] for k in ("data", "logs", "qc", "seismic", "tie", "traverse", "rockphysics", "next")],
+})
+with st.sidebar:
+    st.divider()
+    st.markdown("**Progress**")
+    for key, label in (("data", "Data"), ("qc", "Well QC"), ("seismic", "Seismic cache"), ("tie", "Well tie")):
+        st.markdown(f"{STATUS_ICON[status[key]]} {label}")
+    st.caption(f"Selected well: **{st.session_state['well']}**")
+# Test hook: POSEIDON_APP_PAGE=<page key> renders one page directly (used by headless tests).
+_forced_page = os.environ.get("POSEIDON_APP_PAGE")
+if _forced_page:
+    {"overview": page_overview, "data": page_data, "logs": page_logs, "qc": page_qc, "seismic": page_seismic,
+     "tie": page_tie, "traverse": page_traverse, "rockphysics": page_rockphysics, "next": page_next}[_forced_page]()
+else:
+    navigation.run()
