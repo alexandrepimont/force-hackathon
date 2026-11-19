@@ -192,13 +192,13 @@ with st.sidebar:
     reservoir_model_path = data_directory / "model" / "earth_model_synthetic.npz"
 
     st.caption(
-        "Use a folder containing a well-log CSV/Parquet file. "
+        "Use a folder containing a well-log CSV, Parquet, or LAS file. "
         "Checkshot, gather, and reservoir model views are optional."
     )
     if well_path:
         st.success(f"Well logs: {well_path.name}")
     else:
-        st.warning("No supported well-log CSV or Parquet file found in this folder.")
+        st.warning("No supported well-log CSV, Parquet, or LAS file found in this folder.")
 
 if well_path is None:
     st.markdown(
@@ -207,7 +207,7 @@ if well_path is None:
         "<p>Inspect well-log, time-depth, QC, and seismic inputs.</p></div>",
         unsafe_allow_html=True,
     )
-    st.info("Select a local folder with a well-log CSV or Parquet file in the sidebar.")
+    st.info("Select a local folder with a well-log CSV, Parquet, or LAS file in the sidebar.")
     st.stop()
 
 try:
@@ -298,15 +298,15 @@ metric_columns[3].metric("Missing values", f"{missing_percent:.2f}%")
 
 tabs = st.tabs(
     [
-        "Reservoir model",
         "Well logs",
+        "Reservoir model",
         "Rock-property crossplots",
         "Seismic gather",
         "Data preview",
     ]
 )
 
-with tabs[0]:
+with tabs[1]:
     st.subheader("Faulted reservoir conceptualization")
     st.caption(
         "Synthetic 3D structural model. Depth increases downward; local coordinates are metres."
@@ -580,7 +580,7 @@ with tabs[0]:
         except Exception as exc:
             st.error(f"Could not render the local reservoir model ({type(exc).__name__}).")
 
-with tabs[1]:
+with tabs[0]:
     st.subheader("Well-log tracks")
     available_curves = [
         column
