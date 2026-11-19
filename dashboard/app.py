@@ -1538,8 +1538,11 @@ def page_simulation():
 
     st.subheader("Run")
     r1 = st.columns([1.4, 1, 3])
-    n = r1[0].select_slider("Number of pseudo-wells", [5000, 10000, 20000, 40000], value=20000, key="sim_n")
-    r1[2].caption(f"About {max(5, int(n / 20000 * 45))} s. The run is saved as soon as it finishes "
+    n = r1[0].select_slider("Number of pseudo-wells", [2000, 5000, 10000], value=5000, key="sim_n",
+                            help="Particles in the sequential Monte Carlo. A plain Monte Carlo prior of the same "
+                                 "size (at least 5,000) is run alongside for comparison.")
+    win_s = max(float(t1) - float(t0), 20.0) / 1000
+    r1[2].caption(f"About {max(15, int(n / 5000 * (25 + 120 * win_s)))} s. The run is saved as soon as it finishes "
                   "(outputs/simulation/) and can be reopened below.")
     if r1[1].button("Run simulation", type="primary", disabled=not valid, key="sim_run"):
         meta = _run_simulation_ui(int(il), int(xl), float(t0), float(t1), int(n))

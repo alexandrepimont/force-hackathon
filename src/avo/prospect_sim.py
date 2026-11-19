@@ -91,12 +91,13 @@ class Prior:
     n_blocks: np.ndarray             # (F,)
     ar1: float = 0.0                 # correlation of (whitened) property residuals between consecutive layers
     ar1_calibration: dict | None = None
+    between_frac: float = 0.0        # share of the property variance that is a per-pseudo-well (well-level) offset
 
     def to_dict(self):
         return {"facies": self.facies, "proportions": self.proportions.round(4).tolist(),
                 "transitions": self.transitions.round(4).tolist(), "wells": self.wells,
                 "n_blocks": self.n_blocks.tolist(), "ar1_between_layers": round(self.ar1, 3),
-                "ar1_calibration": self.ar1_calibration,
+                "ar1_calibration": self.ar1_calibration, "between_well_variance_fraction": round(self.between_frac, 3),
                 "mean_thickness_m": [round(float(t.mean()), 2) if len(t) else None for t in self.thickness],
                 "depth_range_m": self.depth_range.round(0).tolist(), "n_sw_gas": int(len(self.sw_gas))}
 
@@ -205,7 +206,7 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     # spread must be the spread of layer means, not of 1 m blocks
     lay = ok[ok["layer"] >= 0].groupby("layer").agg(**{p: (p, "mean") for p in PROPS}, tvdss=("tvdss", "mean"),
                                                      fid=("fid", "first"), seq=("seq", "first"),
-                                                     nb=("tvdss", "size"))
+                                                     well=("well", "first"), nb=("tvdss", "size"))
     lay_res = np.full((len(lay), n_p), np.nan)
     for f in range(len(facies)):
         d = ok[ok["fid"] == f]
@@ -237,9 +238,13 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     r1, r0 = lay_res[1:][same], lay_res[:-1][same]
     ar1 = float(np.clip(np.nanmean([np.corrcoef(r0[:, k], r1[:, k])[0, 1] for k in range(n_p)]), 0.0, 0.95)) \
         if same.sum() > 10 else 0.0
+    # share of the (whitened) variance that is a well-level offset: it is drawn once per pseudo-well, the rest
+    # varies from layer to layer. This bounds how far a whole column can shift away from the depth trend.
+    wm = pd.DataFrame(lay_res, index=lay["well"].to_numpy()).groupby(level=0).mean()
+    between = float(np.clip(np.nanmean(wm.var(axis=0, ddof=1).to_numpy()), 0.02, 0.9)) if len(wm) > 2 else 0.2
     props = np.array([sum(t) for t in thickness], dtype=float)
     return Prior(facies, props / props.sum(), trans, [np.array(t) for t in thickness], a, b, chol, depth_range,
-                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks, ar1)
+                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks, ar1, between_frac=between)
 
 
 # ----------------------------------------------------------------------------------------- simulation
@@ -278,11 +283,14 @@ def calibrate_ar1(prior: Prior, cfg: dict, calib: dict, ties_dir: Path, held_out
             "mean_abs_log_ratio": round(best[0], 3)}
 
 
-def _draw_props(prior: Prior, f: np.ndarray, z: np.ndarray, margin: float, eps: np.ndarray) -> np.ndarray:
+def _draw_props(prior: Prior, f: np.ndarray, z: np.ndarray, margin: float, eps: np.ndarray,
+                u: np.ndarray | None = None) -> np.ndarray:
     lo = prior.depth_range[f, 0] - margin
     hi = prior.depth_range[f, 1] + margin
     zc = np.clip(z, lo, hi) - 4500.0
     mean = prior.trend_a[f] + prior.trend_b[f] * zc[:, None]
+    if u is not None:
+        eps = np.sqrt(prior.between_frac) * u + np.sqrt(1 - prior.between_frac) * eps
     x = mean + np.einsum("nij,nj->ni", prior.chol[f], eps)
     for k, p in enumerate(PROPS):
         x[:, k] = np.clip(x[:, k], *CLIP[p])
@@ -290,54 +298,122 @@ def _draw_props(prior: Prior, f: np.ndarray, z: np.ndarray, margin: float, eps: 
     return x
 
 
+LAYER_KEYS = ["facies", "top_t", "top_z", "h", "phi", "vsh", "vp", "vs", "rho", "gr", "sw", "gas"]
+
+
+class LayerSim:
+    """Growing set of layered pseudo-wells that can be extended downwards, resampled and truncated.
+
+    Used for plain Monte Carlo (extend once) and for the sequential Monte Carlo posterior (extend segment by
+    segment, resample on the seismic misfit, cut below the scored segment and regenerate)."""
+
+    def __init__(self, prior: Prior, cfg: dict, n: int, z_start: float, t_start: float,
+                 z_window: tuple[float, float], rng):
+        self.prior, self.rng, self.n = prior, rng, n
+        self.fcfg = cfg["fluid"]
+        self.margin = cfg["training"]["trend_depth_margin_m"]
+        self.gas_f = np.array([f in self.fcfg["gas_facies"] for f in prior.facies])
+        span = z_window[1] - z_window[0]
+        self.has_gas = rng.random(n) < self.fcfg["p_gas_column"]
+        contact = rng.uniform(z_window[0], z_window[1] + self.fcfg["contact_below_window_frac"] * span, n)
+        contact[~self.has_gas] = -np.inf
+        self.contact = contact
+        lo, hi = self.fcfg["sw_gas_clip"]
+        self.sw_pool = np.clip(prior.sw_gas, lo, hi) if len(prior.sw_gas) else np.array([0.3])
+        self.cum_t = np.full(n, t_start)
+        self.cum_z = np.full(n, z_start)
+        self.f = rng.choice(len(prior.facies), size=n, p=prior.proportions)
+        self.eps = rng.standard_normal((n, len(PROPS)))
+        self.u = rng.standard_normal((n, len(PROPS)))     # per-pseudo-well offset (well-level variability)
+        self.cdf = np.cumsum(prior.transitions, axis=1)
+        self.lay = {k: np.empty((n, 0)) for k in LAYER_KEYS}
+
+    def extend(self, t_end: float):
+        prior, rng, n = self.prior, self.rng, self.n
+        a1 = prior.ar1
+        new = {k: [] for k in LAYER_KEYS}
+        while True:
+            active = self.cum_t < t_end
+            if not active.any():
+                break
+            f, cum_z = self.f, self.cum_z
+            h = np.array([prior.thickness[fi][rng.integers(len(prior.thickness[fi]))] for fi in f])
+            x = _draw_props(prior, f, cum_z + h / 2, self.margin, self.eps, self.u)
+            self.eps = a1 * self.eps + np.sqrt(1 - a1 ** 2) * rng.standard_normal(self.eps.shape)
+            phi, vsh, vp, vs, rho, gr = x.T
+            gas = self.gas_f[f] & (cum_z + h / 2 < self.contact)
+            sw = np.ones(n)
+            if gas.any():
+                sw[gas] = rng.choice(self.sw_pool, size=int(gas.sum()))
+                fl = fluids_at(cum_z[gas] + h[gas] / 2, self.fcfg)
+                vp_g, vs_g, rho_g = substitute_gas(vp[gas], vs[gas], rho[gas], phi[gas], vsh[gas], sw[gas], fl,
+                                                   self.fcfg)
+                vp, vs, rho = vp.copy(), vs.copy(), rho.copy()
+                vp[gas], vs[gas], rho[gas] = vp_g, vs_g, rho_g
+            for k, v in zip(LAYER_KEYS, [f, self.cum_t, cum_z, h, phi, vsh, vp, vs, rho, gr, sw, gas]):
+                vals = np.asarray(v, dtype=float).copy()
+                vals[~active] = np.nan
+                new[k].append(vals)
+            self.cum_t = self.cum_t + np.where(active, 2 * h / vp, 0)
+            self.cum_z = cum_z + np.where(active, h, 0)
+            u = rng.random(n)[:, None]
+            nxt = np.minimum((u > self.cdf[f]).sum(axis=1), len(prior.facies) - 1)
+            self.f = np.where(active, nxt, f)
+        if new["top_t"]:
+            for k in LAYER_KEYS:
+                self.lay[k] = np.concatenate([self.lay[k], np.stack(new[k], axis=1)], axis=1)
+            self._compact()
+        return self
+
+    def _compact(self):
+        """Move NaN (unused) layer slots to the end of each row so top_t stays sorted."""
+        valid = np.isfinite(self.lay["top_t"])
+        if valid.all():
+            return
+        order = np.argsort(~valid, axis=1, kind="stable")
+        keep = int(valid.sum(axis=1).max())
+        for k in LAYER_KEYS:
+            self.lay[k] = np.take_along_axis(self.lay[k], order, axis=1)[:, :keep]
+
+    def resample(self, idx: np.ndarray):
+        for k in LAYER_KEYS:
+            self.lay[k] = self.lay[k][idx]
+        for a in ("has_gas", "contact", "cum_t", "cum_z", "f", "eps", "u"):
+            setattr(self, a, getattr(self, a)[idx])
+
+    def truncate(self, t_cut: float):
+        """Remove everything below t_cut (TWT s); the layer straddling t_cut is shortened to end there."""
+        top, h, vp = self.lay["top_t"], self.lay["h"], self.lay["vp"]
+        bottom = top + 2 * h / vp
+        below = top >= t_cut
+        straddle = (top < t_cut) & (bottom > t_cut)
+        h_new = np.where(straddle, (t_cut - top) * vp / 2, h)
+        self.lay["h"] = h_new
+        for k in LAYER_KEYS:
+            self.lay[k] = np.where(below, np.nan, self.lay[k])
+        self._compact()
+        valid = np.isfinite(self.lay["top_t"])
+        last = np.maximum(valid.sum(axis=1) - 1, 0)
+        rows = np.arange(self.n)
+        lt, lz, lh, lv = (self.lay[k][rows, last] for k in ("top_t", "top_z", "h", "vp"))
+        self.cum_t = np.minimum(self.cum_t, lt + 2 * lh / lv)
+        self.cum_z = lz + lh
+        # continue the Markov chain from the facies of the (now last) layer
+        lf = self.lay["facies"][rows, last].astype(int)
+        u = self.rng.random(self.n)[:, None]
+        self.f = np.minimum((u > self.cdf[lf]).sum(axis=1), len(self.prior.facies) - 1)
+
+    def layers(self) -> dict:
+        out = dict(self.lay)
+        out["has_gas"] = self.has_gas
+        out["contact_tvdss"] = np.where(self.has_gas, self.contact, np.nan)
+        return out
+
+
 def simulate_layers(prior: Prior, cfg: dict, n: int, z_start: float, t_start: float, t_end: float,
                     z_window: tuple[float, float], rng) -> dict:
     """Layered realizations from t_start to beyond t_end. Arrays are (n, L) with NaN padding."""
-    fcfg = cfg["fluid"]
-    margin = cfg["training"]["trend_depth_margin_m"]
-    gas_f = np.array([f in fcfg["gas_facies"] for f in prior.facies])
-    span = z_window[1] - z_window[0]
-    has_gas = rng.random(n) < fcfg["p_gas_column"]
-    contact = rng.uniform(z_window[0], z_window[1] + fcfg["contact_below_window_frac"] * span, n)
-    contact[~has_gas] = -np.inf
-    lo, hi = fcfg["sw_gas_clip"]
-    sw_pool = np.clip(prior.sw_gas, lo, hi) if len(prior.sw_gas) else np.array([0.3])
-
-    cum_t = np.full(n, t_start)
-    cum_z = np.full(n, z_start)
-    f = rng.choice(len(prior.facies), size=n, p=prior.proportions)
-    eps = rng.standard_normal((n, len(PROPS)))
-    a1 = prior.ar1
-    cols = {k: [] for k in ["facies", "top_t", "top_z", "h", "phi", "vsh", "vp", "vs", "rho", "gr", "sw", "gas"]}
-    cdf = np.cumsum(prior.transitions, axis=1)
-    while True:
-        active = cum_t < t_end
-        if not active.any():
-            break
-        h = np.array([prior.thickness[fi][rng.integers(len(prior.thickness[fi]))] for fi in f])
-        x = _draw_props(prior, f, cum_z + h / 2, margin, eps)
-        eps = a1 * eps + np.sqrt(1 - a1 ** 2) * rng.standard_normal(eps.shape)
-        phi, vsh, vp, vs, rho, gr = x.T
-        gas = gas_f[f] & (cum_z + h / 2 < contact)
-        sw = np.ones(n)
-        if gas.any():
-            sw[gas] = rng.choice(sw_pool, size=int(gas.sum()))
-            fl = fluids_at(cum_z[gas] + h[gas] / 2, fcfg)
-            vp_g, vs_g, rho_g = substitute_gas(vp[gas], vs[gas], rho[gas], phi[gas], vsh[gas], sw[gas], fl, fcfg)
-            vp, vs, rho = vp.copy(), vs.copy(), rho.copy()
-            vp[gas], vs[gas], rho[gas] = vp_g, vs_g, rho_g
-        for k, v in zip(cols, [f, cum_t, cum_z, h, phi, vsh, vp, vs, rho, gr, sw, gas]):
-            vals = np.asarray(v, dtype=float).copy()
-            vals[~active] = np.nan
-            cols[k].append(vals)
-        cum_t = cum_t + np.where(active, 2 * h / vp, 0)
-        cum_z = cum_z + np.where(active, h, 0)
-        u = rng.random(n)[:, None]
-        f = np.minimum((u > cdf[f]).sum(axis=1), len(prior.facies) - 1)
-    out = {k: np.stack(v, axis=1) for k, v in cols.items()}
-    out["has_gas"] = has_gas
-    out["contact_tvdss"] = np.where(has_gas, contact, np.nan)
-    return out
+    return LayerSim(prior, cfg, n, z_start, t_start, z_window, rng).extend(t_end).layers()
 
 
 def layers_to_grid(lay: dict, t_grid: np.ndarray, keys: list[str]) -> dict:
@@ -557,6 +633,164 @@ def run_simulation(*, prior: Prior, cfg: dict, calib: dict, t_seis_s: np.ndarray
             "z_window": z_window, "facies": prior.facies, "half_window_ms": half * dt_out_ms}
 
 
+def _systematic_resample(w: np.ndarray, rng) -> np.ndarray:
+    n = len(w)
+    c = np.cumsum(w)
+    c[-1] = 1.0
+    return np.searchsorted(c, (rng.random() + np.arange(n)) / n)
+
+
+def run_smc(*, prior: Prior, cfg: dict, calib: dict, t_seis_s: np.ndarray, obs: np.ndarray, t_top_s: float,
+            t_base_s: float, td: tuple[np.ndarray, np.ndarray], n: int | None = None, seed: int | None = None,
+            progress=None) -> dict:
+    """Sequential Monte Carlo (particle filter) posterior along the pseudo-well path.
+
+    Pseudo-wells are grown from the top of the window in segments. After each segment they are weighted by the
+    near/mid/far misfit of the new samples, resampled, cut at the base of the scored segment and regrown below
+    it (rejuvenation). Statistics of a segment are recorded one step later (fixed-lag smoothing), when the next
+    segment's overlapping wavelet has also been taken into account. The prior summary and prior examples come
+    from plain Monte Carlo (run_simulation), so prior and posterior are directly comparable."""
+    scfg = cfg["smc"]
+    n = n or scfg["n_particles"]
+    rng = np.random.default_rng((cfg["seed"] if seed is None else seed) + 1)
+    lcfg = cfg["likelihood"]
+
+    def prior_progress(f, msg):
+        if progress:
+            progress(0.3 * f, "prior Monte Carlo")
+
+    base = run_simulation(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis_s, obs=obs, t_top_s=t_top_s,
+                          t_base_s=t_base_s, td=td, n=min(cfg["n_realizations"], max(n, 5000)), seed=seed,
+                          progress=prior_progress)
+
+    stacks = [StackDef(k, v["angle_min"], v["angle_max"]) for k, v in calib["stacks"].items()]
+    dt_model = 0.001
+    wavelets = [fw.ricker(v["freq_hz"], dt_model, 0.128, v["phase_deg"]) for v in calib["stacks"].values()]
+    sigma = base["sigma"]
+    polarity = -1.0
+    t_out, obs_n, score = base["t_out_s"], base["obs_norm"], base["score_mask"]
+    t_model = base["t_model_s"]
+    r = int(round((t_out[1] - t_out[0]) / dt_model))
+    temper = base["temper"]
+    td_t, td_z = td
+    t_start, t_stop = t_model[0] - 0.002, t_model[-1] + 0.002
+    z_of_t = lambda t: float(np.interp(t, td_t, td_z))
+    z_window = (z_of_t(t_top_s), z_of_t(t_base_s))
+
+    seg = scfg["segment_ms"] / 1000
+    look = scfg["lookahead_ms"] / 1000
+    edges = list(np.arange(t_top_s, t_base_s - 1e-9, seg)) + [t_base_s]
+    segs = list(zip(edges[:-1], edges[1:]))
+    sim = LayerSim(prior, cfg, n, z_of_t(t_start), t_start, z_window, rng)
+
+    nt, nf = len(t_model), len(prior.facies)
+    acc = {"hist": {p: np.zeros((nt, N_BINS)) for p in HIST_RANGE}, "tvdss": np.zeros((nt, N_BINS)),
+           "facies": np.zeros((nt, nf)), "gas": np.zeros(nt), "syn": np.zeros((len(stacks), len(t_out), N_BINS))}
+    z_lo, z_hi = z_of_t(t_start) - 50.0, z_of_t(t_start) + 2500.0
+    syn_lo, syn_hi = -0.4, 0.4
+    keys = ["facies", "phi", "vsh", "vp", "vs", "rho", "gr", "sw", "gas", "top_z"]
+
+    def record(t_a, t_b, syn):
+        """Equal-weight statistics of the current particles for model samples in [t_a, t_b)."""
+        m = (t_model >= t_a) & (t_model < t_b)
+        mo = (t_out >= t_a) & (t_out < t_b)
+        if not m.any():
+            return
+        g = layers_to_grid(sim.layers(), t_model[m], keys)
+        g["ai"], g["vpvs"] = g["vp"] * g["rho"], g["vp"] / g["vs"]
+        w = np.full((n, int(m.sum())), 1.0 / n)
+        for p, (lo, hi) in HIST_RANGE.items():
+            h = np.zeros((int(m.sum()), N_BINS))
+            _hist_add(h, g[p], w, lo, hi)
+            acc["hist"][p][m] += h
+        h = np.zeros((int(m.sum()), N_BINS))
+        _hist_add(h, g["tvdss"], w, z_lo, z_hi)
+        acc["tvdss"][m] += h
+        fac = g["facies"].astype(int)
+        acc["facies"][m] += np.stack([(fac == f).mean(axis=0) for f in range(nf)], axis=1)
+        acc["gas"][m] += np.nan_to_num(g["gas"]).mean(axis=0)
+        if mo.any():
+            wo = np.full((n, int(mo.sum())), 1.0 / n)
+            for kk in range(len(stacks)):
+                h = np.zeros((int(mo.sum()), N_BINS))
+                _hist_add(h, syn[:, kk][:, mo], wo, syn_lo, syn_hi)
+                acc["syn"][kk][mo] += h
+
+    def forward_now():
+        grid = layers_to_grid(sim.layers(), t_model, ["vp", "vs", "rho"])
+        return forward_batch(grid, stacks, wavelets, r, polarity)
+
+    ess_out = np.full(len(t_out), np.nan)
+    betas, ess_seg = [], []
+    target = scfg["ess_target_frac"] * n
+    pending = None    # (t_a, t_b) of the segment whose statistics are recorded after the next resampling
+    for k, (a, b) in enumerate(segs):
+        last = k == len(segs) - 1
+        sim.extend(min(b + look, t_stop) if not last else t_stop)
+        syn = forward_now()
+        cols = score & (t_out >= a) & ((t_out < b) if not last else (t_out <= b))
+        mis = (((syn[:, :, cols] - obs_n[None][:, :, cols]) / sigma[None, :, None]) ** 2).sum(axis=(1, 2))
+        ll = -0.5 * temper * mis
+        ll -= ll.max()
+
+        def ess(beta):
+            w = np.exp(beta * ll)
+            w /= w.sum()
+            return 1.0 / (w ** 2).sum()
+
+        beta = 1.0
+        if ess(1.0) < target:
+            lo_b, hi_b = 0.0, 1.0
+            for _ in range(25):
+                mid = 0.5 * (lo_b + hi_b)
+                lo_b, hi_b = (mid, hi_b) if ess(mid) >= target else (lo_b, mid)
+            beta = max(lo_b, 1e-4)
+        w = np.exp(beta * ll)
+        w /= w.sum()
+        e = 1.0 / (w ** 2).sum()
+        betas.append(beta)
+        ess_seg.append(e)
+        ess_out[cols] = e
+        idx = _systematic_resample(w, rng)
+        sim.resample(idx)
+        syn = syn[idx]
+        if pending is not None:
+            record(*pending, syn)
+        pending = (t_start if k == 0 else a, b)
+        if last:
+            record(pending[0], t_stop + 1, syn)
+        else:
+            sim.truncate(b)
+        if progress:
+            progress(0.3 + 0.7 * (k + 1) / len(segs), f"sequential Monte Carlo, segment {k + 1}/{len(segs)}")
+
+    # final particles: global misfit for the "best" examples
+    syn = forward_now()
+    mis_all = (((syn[:, :, score] - obs_n[None][:, :, score]) / sigma[None, :, None]) ** 2).sum(axis=(1, 2))
+    glob_ll = -0.5 * temper * mis_all
+    g_all = layers_to_grid(sim.layers(), t_model, keys)
+    _, first = np.unique(np.round(glob_ll, 8), return_index=True)
+    best = first[np.argsort(glob_ll[first])[::-1][:lcfg["n_best"]]]
+    examples = dict(base["examples"])
+    examples["best"] = {**{kk: g_all[kk][best] for kk in keys[:-1] + ["tvdss"]}, "syn": syn[best],
+                        "has_gas": sim.has_gas[best], "loglik": glob_ll[best]}
+
+    summary = {kk: v for kk, v in base["summary"].items() if kk.startswith("prior_")}
+    summary["post_facies_prob"] = (acc["facies"] / np.maximum(acc["facies"].sum(axis=1, keepdims=True), 1e-12)).T
+    summary["post_p_gas"] = acc["gas"] / np.maximum(acc["facies"].sum(axis=1), 1e-12)
+    summary["post_p_gas_column"] = float(sim.has_gas.mean())
+    for p, (lo, hi) in HIST_RANGE.items():
+        summary[f"post_{p}_q"] = _hist_quantiles(acc["hist"][p], lo, hi)
+    summary["post_tvdss_q"] = _hist_quantiles(acc["tvdss"], z_lo, z_hi)
+    summary["post_syn_q"] = np.stack([_hist_quantiles(acc["syn"][kk], syn_lo, syn_hi) for kk in range(len(stacks))],
+                                     axis=1)
+    ess_out = np.where(np.isnan(ess_out), n, ess_out)
+    return {**base, "summary": summary, "examples": examples, "ess_local": ess_out,
+            "ess_global": float(min(ess_seg)), "n": n, "beta": float(min(betas)), "method": "smc",
+            "smc": {"segments": len(segs), "beta_per_segment": [round(b_, 3) for b_ in betas],
+                    "ess_per_segment": [round(float(e_), 1) for e_ in ess_seg], "n_prior": base["n"]}}
+
+
 # ----------------------------------------------------------------------------------------- saving
 def save_result(path: Path, res: dict, meta: dict) -> dict:
     """npz with grids, summaries and example pseudo-wells + json metadata (one call = one checkpoint)."""
@@ -571,7 +805,8 @@ def save_result(path: Path, res: dict, meta: dict) -> dict:
             arrays[f"ex_{ex}_{k}"] = np.asarray(v, dtype=np.float32 if np.ndim(v) > 1 else None)
     np.savez_compressed(path.with_suffix(".npz"), **arrays)
     sc = res["score_mask"]
-    meta = {**meta, "n_realizations": res["n"], "likelihood_temper": round(res["temper"], 4),
+    meta = {**meta, "method": res.get("method", "localised_importance_sampling"), "smc": res.get("smc"),
+            "n_realizations": res["n"], "likelihood_temper": round(res["temper"], 4),
             "adaptive_beta": round(res["beta"], 4),
             "rms_obs": [round(float(v), 4) for v in np.sqrt((res["obs_norm"][:, sc] ** 2).mean(axis=1))],
             "rms_prior_spread": [round(float(v), 4) for v in
@@ -623,7 +858,7 @@ def prepare_prior(root: Path, cfg: dict, calib: dict, held_out: list[str]) -> Pr
 
 def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *, n: int | None = None,
                     name: str | None = None, well: str | None = None, prior: Prior | None = None,
-                    progress=None) -> dict:
+                    progress=None, overrides: dict | None = None) -> dict:
     """Simulate a pseudo-well at (il, xl) over the TWT window [t0_ms, t1_ms] and save it to outputs/simulation."""
     import time
 
@@ -631,6 +866,8 @@ def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *,
 
     t_start = time.time()
     cfg, calib, petro = load_configs(root)
+    for section, values in (overrides or {}).items():
+        cfg[section] = {**cfg[section], **values} if isinstance(values, dict) else values
     held_out = petro["held_out_wells"]
     tie_cfg = yaml.safe_load((root / "configs" / "well_tie.yaml").read_text(encoding="utf-8"))
     cache = root / "data" / "poseidon" / "seismic" / "cache"
@@ -642,8 +879,9 @@ def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *,
     prior = prior or prepare_prior(root, cfg, calib, held_out)
     td_t, td_z, td_well, td_km = location_td(root, x, y, held_out)
     t_seis, obs = well_traces(cache, list(calib["stacks"]), il, xl, tie_cfg["trace_bundle"])
-    res = run_simulation(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis, obs=obs, t_top_s=t0_ms / 1000,
-                         t_base_s=t1_ms / 1000, td=(td_t, td_z), n=n, progress=progress)
+    runner = run_smc if cfg.get("method", "smc") == "smc" else run_simulation
+    res = runner(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis, obs=obs, t_top_s=t0_ms / 1000,
+                 t_base_s=t1_ms / 1000, td=(td_t, td_z), n=n, progress=progress)
     name = name or (f"well_{well}" if well else f"il{il}_xl{xl}_{int(t0_ms)}_{int(t1_ms)}")
     meta = {"name": name, "inline": int(il), "crossline": int(xl), "x": x, "y": y,
             "window_twt_ms": [float(t0_ms), float(t1_ms)], "well": well,
