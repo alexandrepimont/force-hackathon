@@ -117,6 +117,48 @@ def read_gather(path: Path) -> dict[str, np.ndarray]:
     return result
 
 
+def read_reservoir_model(path: Path) -> dict[str, np.ndarray]:
+    """Read and validate the safe, local synthetic reservoir model arrays."""
+    required = {
+        "x_m",
+        "y_m",
+        "z_m",
+        "vp_m_s",
+        "vs_m_s",
+        "rho_g_cc",
+        "formation",
+        "lithology",
+        "fluid",
+        "horizon_Upper_Shale_Base_m",
+        "horizon_Top_Reservoir_m",
+        "horizon_Base_Reservoir_m",
+        "horizon_Base_Basal_Shale_m",
+    }
+    with np.load(path, allow_pickle=False) as archive:
+        if not required.issubset(archive.files):
+            raise ValueError("The NPZ file does not contain the expected reservoir-model arrays.")
+        result = {key: archive[key].copy() for key in archive.files}
+
+    x, y, z = result["x_m"], result["y_m"], result["z_m"]
+    shape = (len(z), len(y), len(x))
+    for key in ("vp_m_s", "vs_m_s", "rho_g_cc", "formation", "lithology", "fluid"):
+        if result[key].shape != shape:
+            raise ValueError(f"Reservoir array {key} does not match the depth × Y × X grid.")
+    for key in required - {"x_m", "y_m", "z_m", "formation", "lithology", "fluid"}:
+        values = result[key]
+        expected_shape = shape[1:] if key.startswith("horizon_") else None
+        if expected_shape is not None and values.shape != expected_shape:
+            raise ValueError(f"Reservoir horizon {key} does not match the Y × X grid.")
+        if values.dtype.kind not in "US" and not np.isfinite(values).all():
+            raise ValueError(f"Reservoir model array {key} contains non-finite values.")
+    for axis, name in ((x, "X"), (y, "Y"), (z, "depth")):
+        if axis.ndim != 1 or len(axis) < 2 or not np.all(np.diff(axis) > 0):
+            raise ValueError(
+                f"Reservoir {name} coordinates must be one-dimensional and increasing."
+            )
+    return result
+
+
 def is_synthetic(frame: pd.DataFrame, manifest: dict[str, Any]) -> bool:
     """Return true if either column-level or manifest provenance marks synthetic data."""
     if manifest.get("synthetic_data") is True:
