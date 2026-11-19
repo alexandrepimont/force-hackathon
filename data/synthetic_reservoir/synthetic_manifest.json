@@ -1,0 +1,134 @@
+{
+  "synthetic_data": true,
+  "warning": "Entirely synthetic conceptual scenario; not derived from, calibrated to, or representative of real Volve measurements.",
+  "scenario": "SYNTHETIC-NORTH-FAULTED-CHANNEL",
+  "random_seed": 20261120,
+  "generated_by": "src/synthetic_reservoir.py",
+  "config_file": "scenario_synthetic.yml",
+  "coordinate_system": "local synthetic Cartesian coordinates in metres; not geographic",
+  "well_count": 7,
+  "well_ids": [
+    "SYNTH-WELL-01",
+    "SYNTH-WELL-02",
+    "SYNTH-WELL-03",
+    "SYNTH-WELL-04",
+    "SYNTH-WELL-05",
+    "SYNTH-WELL-06",
+    "SYNTH-WELL-07"
+  ],
+  "well_log_rows": 21000,
+  "checkshot_tie_points": 210,
+  "formations": [
+    "Upper_Shale",
+    "Top_Seal",
+    "Reservoir_Sand",
+    "Basal_Shale",
+    "Tight_Carbonate"
+  ],
+  "faults": [
+    {
+      "id": "F1",
+      "name": "Western normal fault",
+      "x_intercept_m": 1550.0,
+      "x_slope_per_y": 0.18,
+      "reference_y_m": 2000.0,
+      "throw_m": 80.0,
+      "downthrown_side": "east"
+    },
+    {
+      "id": "F2",
+      "name": "Eastern antithetic fault",
+      "x_intercept_m": 3050.0,
+      "x_slope_per_y": -0.12,
+      "reference_y_m": 2000.0,
+      "throw_m": 55.0,
+      "downthrown_side": "west"
+    }
+  ],
+  "grid": {
+    "x_samples": 21,
+    "y_samples": 21,
+    "z_samples": 601,
+    "x_range_m": [
+      0.0,
+      4000.0
+    ],
+    "y_range_m": [
+      0.0,
+      4000.0
+    ],
+    "z_range_m": [
+      1100.0,
+      2600.0
+    ]
+  },
+  "well_log_units": {
+    "MD_M": "m",
+    "TVD_M": "m",
+    "TWT_MS": "ms",
+    "DTC_US_FT": "us/ft",
+    "DTS_US_FT": "us/ft",
+    "RHOB_G_CC": "g/cc",
+    "GR_API": "API",
+    "PHIT_VV": "fraction",
+    "RT_OHM_M": "ohm.m",
+    "SW_VV": "fraction",
+    "CALI_IN": "in",
+    "BS_IN": "in",
+    "DRHO_G_CC": "g/cc",
+    "PEF_B_E": "barn/electron"
+  },
+  "seismic": {
+    "combined_file": "seismic/prestack_angle_gather_synthetic.segy",
+    "angle_volume_files": [
+      "seismic/prestack_angle_05deg_synthetic.segy",
+      "seismic/prestack_angle_15deg_synthetic.segy",
+      "seismic/prestack_angle_25deg_synthetic.segy",
+      "seismic/prestack_angle_35deg_synthetic.segy",
+      "seismic/prestack_angle_45deg_synthetic.segy"
+    ],
+    "format": "SEG-Y revision 1, IEEE float32",
+    "sample_interval_ms": 2.0,
+    "twt_start_ms": 500.0,
+    "twt_end_ms": 1700.0,
+    "angles_deg": [
+      5,
+      15,
+      25,
+      35,
+      45
+    ],
+    "combined_trace_count": 2205,
+    "angle_volume_trace_count": 441,
+    "angle_header": "Combined file: trace-header unassigned integer word 233-236 stores angle in degrees x 1000.",
+    "method": "Shuey three-term reflectivity, 30-Hz zero-phase Ricker, seeded Gaussian noise."
+  },
+  "files": [
+    "README_synthetic.md",
+    "angle_gather_synthetic.npz",
+    "checkshot_synthetic.csv",
+    "checkshot_synthetic.parquet",
+    "model/earth_model_synthetic.npz",
+    "model/faults_synthetic.csv",
+    "model/horizons_synthetic.csv",
+    "model/wells_synthetic.csv",
+    "scenario_synthetic.yml",
+    "seismic/prestack_angle_05deg_synthetic.segy",
+    "seismic/prestack_angle_15deg_synthetic.segy",
+    "seismic/prestack_angle_25deg_synthetic.segy",
+    "seismic/prestack_angle_35deg_synthetic.segy",
+    "seismic/prestack_angle_45deg_synthetic.segy",
+    "seismic/prestack_angle_gather_synthetic.segy",
+    "seismic_gather.html",
+    "structure_map.html",
+    "well_logs_synthetic.csv",
+    "well_logs_synthetic.parquet",
+    "wells/SYNTH-WELL-01.las",
+    "wells/SYNTH-WELL-02.las",
+    "wells/SYNTH-WELL-03.las",
+    "wells/SYNTH-WELL-04.las",
+    "wells/SYNTH-WELL-05.las",
+    "wells/SYNTH-WELL-06.las",
+    "wells/SYNTH-WELL-07.las"
+  ]
+}

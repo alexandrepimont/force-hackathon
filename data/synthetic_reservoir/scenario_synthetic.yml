@@ -1,0 +1,109 @@
+# Fully synthetic conceptual scenario; not calibrated to or representative of real Volve data.
+scenario:
+  name: SYNTHETIC-NORTH-FAULTED-CHANNEL
+  description: >-
+    A small faulted clastic reservoir with shale seals, a gas cap, an oil leg,
+    a brine leg, and a tight carbonate basement.
+  random_seed: 20261120
+  synthetic_data: true
+  units: metric
+
+model:
+  x_min_m: 0
+  x_max_m: 4000
+  y_min_m: 0
+  y_max_m: 4000
+  lateral_samples: 21
+  z_min_m: 1100
+  z_max_m: 2600
+  z_step_m: 2.5
+  log_step_m: 0.5
+  seismic_sample_interval_ms: 2.0
+  seismic_twt_start_ms: 500.0
+  seismic_twt_end_ms: 1700.0
+  seismic_angles_deg: [5, 15, 25, 35, 45]
+  wavelet_frequency_hz: 30.0
+  seismic_noise_std: 0.004
+
+structure:
+  reservoir_top_base_m: 1900.0
+  regional_dip_x: 0.025
+  regional_dip_y: 0.015
+  anticline_amplitude_m: 70.0
+  anticline_x_m: 2050.0
+  anticline_y_m: 1900.0
+  anticline_radius_m: 1050.0
+  caprock_thickness_m: 130.0
+  reservoir_thickness_m: 125.0
+  basal_shale_thickness_m: 115.0
+  gas_column_m: 22.0
+  oil_column_m: 58.0
+  gas_contact_relief_m: 4.0
+  oil_contact_relief_m: 7.0
+
+faults:
+  - id: F1
+    name: Western normal fault
+    x_intercept_m: 1550.0
+    x_slope_per_y: 0.18
+    reference_y_m: 2000.0
+    throw_m: 80.0
+    downthrown_side: east
+  - id: F2
+    name: Eastern antithetic fault
+    x_intercept_m: 3050.0
+    x_slope_per_y: -0.12
+    reference_y_m: 2000.0
+    throw_m: 55.0
+    downthrown_side: west
+
+formations:
+  - {name: Upper_Shale, lithology: shale}
+  - {name: Top_Seal, lithology: shale}
+  - {name: Reservoir_Sand, lithology: sand}
+  - {name: Basal_Shale, lithology: shale}
+  - {name: Tight_Carbonate, lithology: tight}
+
+wells:
+  - {well_id: SYNTH-WELL-01, x_m: 400, y_m: 400}
+  - {well_id: SYNTH-WELL-02, x_m: 1600, y_m: 400}
+  - {well_id: SYNTH-WELL-03, x_m: 3200, y_m: 400}
+  - {well_id: SYNTH-WELL-04, x_m: 400, y_m: 2000}
+  - {well_id: SYNTH-WELL-05, x_m: 2000, y_m: 2000}
+  - {well_id: SYNTH-WELL-06, x_m: 3600, y_m: 2000}
+  - {well_id: SYNTH-WELL-07, x_m: 2000, y_m: 3600}
+
+rock_physics:
+  properties:
+    shale: {vp_m_s: 3100, vs_m_s: 1650, rho_g_cc: 2.36, gr_api: 95, phi: 0.13, rt_ohm_m: 3.2, pef: 3.4}
+    brine_sand: {vp_m_s: 3700, vs_m_s: 2100, rho_g_cc: 2.19, gr_api: 23, phi: 0.24, rt_ohm_m: 1.8, pef: 2.2, sw: 0.88}
+    oil_sand: {vp_m_s: 3500, vs_m_s: 2010, rho_g_cc: 2.13, gr_api: 25, phi: 0.25, rt_ohm_m: 20, pef: 2.2, sw: 0.32}
+    gas_sand: {vp_m_s: 3150, vs_m_s: 1870, rho_g_cc: 2.05, gr_api: 22, phi: 0.27, rt_ohm_m: 45, pef: 2.1, sw: 0.18}
+    tight: {vp_m_s: 5200, vs_m_s: 2950, rho_g_cc: 2.68, gr_api: 10, phi: 0.055, rt_ohm_m: 70, pef: 4.7, sw: 1.0}
+  log_noise:
+    vp_fraction: 0.018
+    vs_fraction: 0.022
+    density_g_cc: 0.025
+    gr_api: 5.0
+    porosity: 0.012
+    log_resistivity_fraction: 0.16
+    bad_hole_intervals_m: [[1420, 1430], [2350, 2360]]
+
+classification:
+  lithology_codes: {shale: 1, sand: 2, tight: 3}
+  fluid_codes: {not_applicable: 0, brine: 1, oil: 2, gas: 3}
+  lithology_classes: [sand, shale, tight]
+  fluid_classes: [brine, oil, gas]
+  joint_classes: [brine_sand, oil_sand, gas_sand, shale, tight]
+
+uncertainty:
+  ensemble_size: 100
+  vp_fractional_sigma: 0.03
+  vs_fractional_sigma: 0.05
+  density_sigma_g_cc: 0.035
+  porosity_sigma: 0.025
+  fluid_saturation_sigma: 0.08
+  wavelet_frequency_sigma_hz: 3.0
+  phase_sigma_deg: 10.0
+  amplitude_scale_fractional_sigma: 0.10
+  noise_fractional_sigma: 0.25
