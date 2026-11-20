@@ -2,7 +2,7 @@
 
 ## Poseidon: pseudo-wells that listen to the seismic
 
-**[▶ Open the interactive presentation](https://alexandrepimont.github.io/force-hackathon/presentation_short/)** (GitHub Pages) · backup link: [raw.githack](https://raw.githack.com/alexandrepimont/force-hackathon/main/docs/presentation_short/index.html) · the whole deck is also shown below
+**[▶ Open the interactive presentation](https://raw.githack.com/alexandrepimont/force-hackathon/main/docs/presentation_short/index.html)** · source: [docs/presentation_short/](docs/presentation_short/index.html)
 
 ![Poseidon far-angle seismic cube with the wells](docs/presentation_short/hero_cube.png)
 
