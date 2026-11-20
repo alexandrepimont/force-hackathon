@@ -49,7 +49,7 @@ def main():
     print(f"prior ready ({time.time() - t0:.0f} s); surface from "
           + ", ".join(f"{p['well']} {p['twt_ms']:.0f} ms" for p in ctx.surface["points"]))
 
-    if not a.no_blind:
+    if not a.no_blind and ctx.held_out:
         tables, infos = [], []
         for well in ctx.held_out:
             tb, info = p3.blind_check(ctx, well)

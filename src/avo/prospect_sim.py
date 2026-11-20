@@ -138,7 +138,8 @@ def load_training_logs(logs_dir: Path, held_out: list[str], tcfg: dict | None = 
             continue
         frames.append(pd.read_parquet(f))
     fr = pd.concat(frames, ignore_index=True)
-    fr = fr[fr["held_out"].astype(str) != "True"]
+    if held_out:
+        fr = fr[fr["held_out"].astype(str) != "True"]
     zone = tcfg.get("zone_formation_prefix")
     if zone:
         fr = fr[fr["formation"].astype(str).str.startswith(zone)]
@@ -898,6 +899,11 @@ def load_configs(root: Path) -> tuple[dict, dict, dict]:
     return cfg, calib, petro
 
 
+def sim_held_out(cfg: dict, petro: dict) -> list[str]:
+    """Wells kept out of the simulation: none if training.include_held_out_wells, else the held-out wells."""
+    return [] if cfg["training"].get("include_held_out_wells") else list(petro["held_out_wells"])
+
+
 def location_td(root: Path, x: float, y: float, held_out: list[str],
                 allowed: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, str, float]:
     """Time-depth of the nearest training well with a final tied time-depth curve (TWT s, TVDSS m).
@@ -938,7 +944,7 @@ def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *,
     cfg, calib, petro = load_configs(root)
     for section, values in (overrides or {}).items():
         cfg[section] = {**cfg[section], **values} if isinstance(values, dict) else values
-    held_out = petro["held_out_wells"]
+    held_out = sim_held_out(cfg, petro)
     tie_cfg = yaml.safe_load((root / "configs" / "well_tie.yaml").read_text(encoding="utf-8"))
     cache = root / "data" / "poseidon" / "seismic" / "cache"
     g = np.load(cache / "poseidon_near.geometry.npz")

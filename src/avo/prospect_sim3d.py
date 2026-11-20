@@ -275,17 +275,16 @@ def weigh(lib: Library, obs: np.ndarray, score: np.ndarray, lk: dict, n_facies: 
 class Context:
     """Prior, surface, likelihood and libraries shared by grid runs and blind-well checks."""
 
-    def __init__(self, root: Path, c3: dict | None = None, prior: ps.Prior | None = None,
-                 win_ms: tuple[float, float] | None = None):
+    def __init__(self, root: Path, c3: dict | None = None, prior: ps.Prior | None = None):
         self.root = root
         self.cfg, self.calib, petro = ps.load_configs(root)
         self.c3 = c3 or load_config(root)
-        self.held_out = list(petro["held_out_wells"])
+        self.held_out = ps.sim_held_out(self.cfg, petro)
         self.prior = prior or ps.prepare_prior(root, self.cfg, self.calib, self.held_out)
         self.surface = top_surface(root, self.held_out, self.c3["horizon"])
         w = self.c3["window"]
         pad = self.cfg["pad_ms"]
-        self.win_ms = win_ms or (-float(w["above_ms"]), float(w["below_ms"]))
+        self.win_ms = (-float(w["above_ms"]), float(w["below_ms"]))
         self.rel_ms = np.arange(self.win_ms[0] - pad, self.win_ms[1] + pad + 0.5 * DT_MS, DT_MS)
         self.score = (self.rel_ms >= self.win_ms[0]) & (self.rel_ms <= self.win_ms[1])
         self.lk = likelihood_setup(self.cfg, self.calib, self.rel_ms)
@@ -310,9 +309,8 @@ class Context:
         return self.libraries[z_band]
 
     def run(self, obs: np.ndarray, z_top: np.ndarray, u: np.ndarray | None = None, prior_only: bool = False,
-            progress=None, score: np.ndarray | None = None) -> dict:
-        """Weigh P traces obs (P, K, nt) raw amplitudes; returns flat per-trace outputs.
-        score: optional (P, nt) per-trace scored samples (default: the context window for all traces)."""
+            progress=None) -> dict:
+        """Weigh P traces obs (P, K, nt) raw amplitudes; returns flat per-trace outputs."""
         obs_n = (obs / self.lk["scales"][None, :, None]).astype(np.float32)
         bands = self.band(z_top)
         nf = len(self.prior.facies)
@@ -326,8 +324,7 @@ class Context:
             idx = np.flatnonzero(bands == zb)
             for s in range(0, len(idx), bsz):
                 sel = idx[s:s + bsz]
-                o = weigh(lib, obs_n[sel], self.score if score is None else score[sel], self.lk, nf,
-                          None if u is None else u[:, sel], prior_only)
+                o = weigh(lib, obs_n[sel], self.score, self.lk, nf, None if u is None else u[:, sel], prior_only)
                 for k, v in o.items():
                     if k not in res:
                         shape = (v.shape[0], total, *v.shape[2:]) if k.startswith("real_") else (total, *v.shape[1:])
@@ -440,104 +437,6 @@ def zone_twt_from_logs(root: Path, well: str, zone: str) -> tuple[float, float] 
     logs = pd.read_parquet(f, columns=["formation", "twt"])
     t = logs.loc[logs["formation"].astype(str).str.startswith(zone), "twt"].dropna()
     return (float(t.min()), float(t.max())) if len(t) else None
-
-
-def read_point_traces(cache: Path, i: np.ndarray, j: np.ndarray, bundle: int) -> np.ndarray:
-    """Mean of bundle x bundle traces around each (i, j) -> (P, K, ns) raw amplitudes."""
-    h = bundle // 2
-    out = []
-    for s in STACKS:
-        g = np.load(cache / f"poseidon_{s}.geometry.npz")
-        cube = np.load(cache / f"poseidon_{s}.f16.npy", mmap_mode="r")
-        tr = np.stack([np.asarray(cube[max(a - h, 0):a + h + 1, max(b - h, 0):b + h + 1], np.float32)
-                       .reshape(-1, cube.shape[2]).mean(axis=0) for a, b in zip(i, j)])
-        out.append(tr * float(g["scale"]))
-    return np.stack(out, axis=1)
-
-
-def run_line(root: Path, name: str, i_idx: np.ndarray, j_idx: np.ndarray, distance_m: np.ndarray,
-             top_ms: np.ndarray, base_ms: np.ndarray, *, step: int = 4, n: int | None = None,
-             prior: ps.Prior | None = None, progress=None, extra_meta: dict | None = None) -> dict:
-    """Simulate every step-th trace along a route inside its zone [top_ms, base_ms] (interpreted, per trace).
-
-    One library per depth band (zone top depth from the time-depth of the nearest well in the prior), scored only
-    inside each trace's zone. Saves outputs/simulation_lines/<name>.npz/.json."""
-    t0 = time.time()
-    sel = np.arange(0, len(i_idx), max(int(step), 1))
-    if sel[-1] != len(i_idx) - 1:
-        sel = np.r_[sel, len(i_idx) - 1]
-    i_idx, j_idx, dist = np.asarray(i_idx)[sel], np.asarray(j_idx)[sel], np.asarray(distance_m)[sel]
-    top, base = np.asarray(top_ms, float)[sel], np.asarray(base_ms, float)[sel]
-    if np.any(base - top < 8):
-        raise ValueError("the zone must be at least 8 ms thick everywhere along the line")
-    c3 = load_config(root)
-    if n:
-        c3["library"]["n"] = int(n)
-    ctx = Context(root, c3, prior, win_ms=(0.0, float(np.ceil((base - top).max() / DT_MS) * DT_MS)))
-    geometry = np.load(ctx.cache / "poseidon_near.geometry.npz")
-    samples = geometry["samples"]
-    x, y = geometry["cdp_x"][i_idx, j_idx], geometry["cdp_y"][i_idx, j_idx]
-
-    # zone-top depth from the time-depth of the nearest well that is in the prior
-    wells = pd.read_csv(root / "data" / "poseidon" / "dashboard" / "wells.csv").set_index("WELL_ID")
-    tds = {}
-    for w in ctx.prior.wells:
-        f = root / "data" / "interim" / "poseidon_td" / f"{w}.csv"
-        if f.exists():
-            td = pd.read_csv(f).dropna(subset=["twt_final_ms"]).sort_values("twt_final_ms")
-            if len(td) >= 10:
-                tds[w] = (td["twt_final_ms"].to_numpy(), td["tvdss"].to_numpy())
-    if not tds:
-        raise ValueError("no well in the prior has a tied time-depth curve")
-    names = list(tds)
-    d = np.hypot(x[:, None] - wells.loc[names, "X_M"].to_numpy(), y[:, None] - wells.loc[names, "Y_M"].to_numpy())
-    near = d.argmin(axis=1)
-    z_top = np.array([np.interp(t, *tds[names[k]]) for t, k in zip(top, near)])
-
-    if progress:
-        progress(0.02, "reading seismic")
-    traces = read_point_traces(ctx.cache, i_idx, j_idx, ctx.c3["grid"]["bundle"])
-    nt = len(ctx.rel_ms)
-    k0 = np.round((top + ctx.rel_ms[0] - samples[0]) / DT_MS).astype(int)
-    if np.any(k0 < 0) or np.any(k0 + nt > len(samples)):
-        raise ValueError("the zone (plus the modelling pad) must lie inside the seismic time range")
-    obs = np.stack([traces[p, :, k0[p]:k0[p] + nt] for p in range(len(sel))])
-    top_snap = samples[0] + k0 * DT_MS - ctx.rel_ms[0]
-    thick = base - top_snap
-    score = (ctx.rel_ms[None, :] >= 0) & (ctx.rel_ms[None, :] <= thick[:, None])
-    res = ctx.run(obs, z_top, score=score,
-                  progress=(lambda f, m: progress(0.05 + 0.9 * f, m)) if progress else None)
-    # prior (wells only) per depth band, for the "what the seismic adds" view
-    prior_fp = np.empty_like(res["facies_prob"])
-    for zb in np.unique(res["band"]):
-        m = res["band"] == zb
-        pr = weigh(ctx.library(float(zb)), obs[:1] * 0, ctx.score, ctx.lk, len(ctx.prior.facies), prior_only=True)
-        prior_fp[m] = pr["facies_prob"][0]
-
-    arrays = {"distance_m": dist, "i": i_idx, "j": j_idx, "inline": geometry["ilines"][i_idx],
-              "crossline": geometry["xlines"][j_idx], "x": x, "y": y, "top_ms": top_snap, "base_ms": base,
-              "z_top_m": z_top, "rel_ms": ctx.rel_ms, "score": score, "facies_names": np.array(ctx.prior.facies),
-              "beta": res["beta"], "ess": res["ess"], "fit_corr": res["fit_corr"], "band": res["band"],
-              "facies_prob": res["facies_prob"].astype(np.float16), "prior_facies_prob": prior_fp.astype(np.float16),
-              "p_gas": res["p_gas"].astype(np.float16), "phi_q": res["phi_q"].astype(np.float16),
-              **{f"{p}_mean": res[f"{p}_mean"].astype(np.float16) for p in MEAN_PROPS}}
-    out = root / "outputs" / "simulation_lines"
-    out.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out / f"{name}.npz", **arrays)
-    min_beta = ctx.c3["support"]["min_beta"]
-    meta = {"name": name, "label": "SIMULATED pseudo-wells along a line (not measured data)",
-            "n_traces": int(len(sel)), "trace_step": int(step), "length_km": round(float(dist[-1]) / 1000, 2),
-            "library_n_per_band": ctx.c3["library"]["n"], "depth_bands_m": sorted(float(b) for b in ctx.libraries),
-            "zone_formation": ctx.cfg["training"].get("zone_formation_prefix"),
-            "training_wells": ctx.prior.wells, "held_out_wells_excluded": ctx.held_out,
-            "time_depth_wells": names, "beta_median": round(float(np.median(res["beta"])), 3),
-            "low_support_fraction": round(float((res["beta"] < min_beta).mean()), 3),
-            "fit_corr_median": round(float(np.median(res["fit_corr"])), 3),
-            "runtime_s": round(time.time() - t0, 1), **(extra_meta or {})}
-    (out / f"{name}.json").write_text(json.dumps(meta, indent=2, default=float), encoding="utf-8")
-    if progress:
-        progress(1.0, "done")
-    return meta
 
 
 # ----------------------------------------------------------------------------------------- blind wells

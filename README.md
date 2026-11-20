@@ -79,16 +79,27 @@ in GDA94 / MGA zone 51, so they load with `avo.segy_io.read_cube`.
   what the automated tie changed and a line through the well with the tie on/off; every seismic view has a 2D map
   showing where the line is. The previous tabbed explorer is kept in `dashboard/legacy_explorer.py`.
 
-## Prospect simulation: 1D pseudo-well at a location (step 9 in the app)
+## Prospect simulation: pseudo-wells in the reservoir zone (step 9 in the app)
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --well Poseidon-2                          # blind test
-.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --il 3180 --xl 2337 --t0 3044 --t1 3292    # any location
+.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --well Poseidon-2                          # blind test (Plover zone)
+.\.venv\Scripts\python.exe scripts\run_prospect_sim.py --il 3180 --xl 2337 --t0 3120 --t1 3316    # any location
 ```
 
-Pick a location (map) and a TWT window (top and base on the section) in step 9 of the app, or use the script.
+The prior is built **only from the Plover Formation** of the wells that have Plover tops
+(`training.zone_formation_prefix` in `configs/prospect_sim.yaml`): Boreas-1, Kronos-1, Poseidon-1, Poseidon-2 and
+Proteus-1. The former blind wells are included by team decision (`training.include_held_out_wells`), so there is no
+independent blind test in the simulation; the well tie (wavelets, scales) still excludes them. Wells without tops
+(Pharos-1, Poseidon-North-1) and Torosa-1 (outside the survey) are not used, neither for the prior nor for the
+time-depth. A single overburden layer drawn from the logs just above Plover gives the top-reservoir contrast.
+
+In step 9 of the app, build a section (inline, crossline or a composite line made by clicking points on the map;
+clicks near a well snap to it),
+mark the reservoir zone on it (pre-filled from the Plover top/base of the wells used; blind wells' tops are hidden)
+and simulate one 1D pseudo-well at the chosen trace, scored inside the zone there. The section is only used to place
+the point and the zone; nothing is simulated between wells in this step (see step 10 for 3D).
 Thousands of pseudo-wells are simulated from the training wells (facies Markov chain and layer thicknesses,
-correlated porosity / Vsh / Vp / Vs / density / GR per facies with depth trends, gas or brine via Gassmann),
+correlated porosity / Vsh / Vp / Vs / density / GR per facies, gas or brine via Gassmann),
 forward-modelled to near/mid/far with the tie wavelets and scales, and weighted against the observed traces at
 the location. Output: facies probabilities, P10/P50/P90 logs, P(gas | sand) and the expected vs observed AVO
 response (`outputs/simulation/<name>.npz/.json`; `<name>_blind.csv` with scores for wells). Settings and all

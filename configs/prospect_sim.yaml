@@ -7,7 +7,8 @@ batch_size: 2000
 seed: 7
 pad_ms: 64                     # modelled above/below the window so the wavelet sees the boundaries (not scored)
 
-# Posterior method (chosen on TRAINING wells Kronos-1, Poseidon-1, Proteus-1; blind wells not used):
+# Posterior method (chosen on TRAINING wells Kronos-1, Poseidon-1, Proteus-1 with the earlier >3500 m prior; blind
+# wells not used):
 #   localised_is - importance weighting with a +/- localisation window (default). Best facies and log scores:
 #                  porosity MAE 0.034 (prior 0.039), Vp MAE 393 m/s (prior 470), P(true facies) 0.48 (prior 0.44)
 #   smc          - sequential Monte Carlo (particle filter): pseudo-wells are grown top-down in segments, weighted
@@ -26,6 +27,9 @@ training:
   # Wells without these tops (Pharos-1, Poseidon-North-1) therefore drop out; their logs and time-depth are not used.
   zone_formation_prefix: "Plover Formation"
   exclude_wells: [Torosa-1]    # has Plover tops but lies outside the seismic survey
+  # Held-out wells (configs/petrophysics.yaml) ARE used in the simulation (prior, time-depth, 3D surface) by team
+  # decision: the blind test was given up for more reservoir data. The well tie (wavelets, scales) still excludes them.
+  include_held_out_wells: true
   depth_trend: false           # Plover spans only a few hundred metres per well: constant per-facies statistics
   overburden_m: 60             # one layer above the zone top drawn from the logs in this interval above Plover
                                # (same training wells), so the top-reservoir reflection has the right contrast
