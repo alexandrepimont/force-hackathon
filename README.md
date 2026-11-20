@@ -93,3 +93,25 @@ forward-modelled to near/mid/far with the tie wavelets and scales, and weighted 
 the location. Output: facies probabilities, P10/P50/P90 logs, P(gas | sand) and the expected vs observed AVO
 response (`outputs/simulation/<name>.npz/.json`; `<name>_blind.csv` with scores for wells). Settings and all
 assumptions are in `configs/prospect_sim.yaml`; held-out wells are never used.
+
+## 3D extrapolation of the pseudo-well simulation (step 10 in the app)
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_prospect_sim3d.py                                  # blind test + 300 m grid (~10 min)
+.\.venv\Scripts\python.exe scripts\run_prospect_sim3d.py --blind-only                     # held-out wells only (~1 min)
+.\.venv\Scripts\python.exe scripts\run_prospect_sim3d.py --il-step 32 --xl-step 48 --name quick   # 600 m grid
+```
+
+The same prior, forward model and localised weighting as step 9, on a decimated grid over the wells' area
+(`src/avo/prospect_sim3d.py`, settings in `configs/prospect_sim3d.yaml`):
+
+- The scored window follows top Plover, interpolated (plane fit) from the first Plover pick of the training wells
+  with a tied time-depth curve (Kronos-1, Poseidon-1, Proteus-1).
+- Pseudo-wells are simulated once per 50 m depth band (shared library) and re-weighted at every trace; traces are
+  dithered between the two nearest bands so the prior changes smoothly with depth.
+- Laterally consistent realizations (P-field): a spatially correlated uniform field picks a library member
+  (ordered by porosity) from each trace's posterior, so facies, porosity and gas come from one consistent member.
+- Output `outputs/simulation3d/<name>.npz/.json`: porosity P10/P50/P90, mean Vp/Vs/density/AI, facies
+  probabilities, P(gas), seismic weight (support) and fit per trace, plus realizations. `<name>_blind.csv/.json`
+  scores the same engine at Poseidon-2 and Boreas-1 (prior vs posterior) and compares the interpolated top with
+  their own picks; their logs and tops are used for scoring only.

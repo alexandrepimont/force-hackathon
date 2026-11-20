@@ -22,7 +22,14 @@ smc:
   ess_target_frac: 0.1         # adaptive tempering per segment keeps at least this fraction effective
 
 training:
-  min_tvdss_m: 3500.0          # zone of interest (same as well QC)
+  # Prior only from the reservoir: log samples whose formation (from the supplied tops) starts with this prefix.
+  # Wells without these tops (Pharos-1, Poseidon-North-1) therefore drop out; their logs and time-depth are not used.
+  zone_formation_prefix: "Plover Formation"
+  exclude_wells: [Torosa-1]    # has Plover tops but lies outside the seismic survey
+  depth_trend: false           # Plover spans only a few hundred metres per well: constant per-facies statistics
+  overburden_m: 60             # one layer above the zone top drawn from the logs in this interval above Plover
+                               # (same training wells), so the top-reservoir reflection has the right contrast
+  min_tvdss_m: 3500.0          # only used when zone_formation_prefix is empty
   block_m: 1.0                 # logs are blocked to this size before facies runs and statistics are computed
   facies: [shale, sand_high_phi, sand_low_phi, tight, volcanic]   # 'unknown' is not simulated
   min_samples_trend: 40        # fewer blocks than this -> no depth trend for that facies

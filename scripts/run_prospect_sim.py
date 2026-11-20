@@ -93,7 +93,18 @@ def main():
     if a.well:
         tie = json.loads((ROOT / "outputs" / "well_ties" / f"{a.well}.json").read_text(encoding="utf-8"))["result"]
         il, xl = tie["inline"], tie["crossline"]
-        t0, t1 = (a.t0, a.t1) if a.t0 else tie["window_ms"]
+        zone = cfg["training"].get("zone_formation_prefix")
+        if a.t0:
+            t0, t1 = a.t0, a.t1
+        elif zone:
+            # score the reservoir zone of the well (its tops place the window; its logs are used for scoring only)
+            logs = pd.read_parquet(ROOT / "data" / "interim" / "poseidon_logs" / f"{a.well}.parquet")
+            z = logs.loc[logs["formation"].astype(str).str.startswith(zone), "twt"].dropna()
+            if z.empty:
+                ap.error(f"{a.well} has no '{zone}' samples; give --t0/--t1")
+            t0, t1 = float(np.floor(z.min() / 4) * 4), float(np.ceil(z.max() / 4) * 4)
+        else:
+            t0, t1 = tie["window_ms"]
     else:
         il, xl, t0, t1 = a.il, a.xl, a.t0, a.t1
         if None in (il, xl, t0, t1):

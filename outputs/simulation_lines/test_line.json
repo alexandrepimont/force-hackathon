@@ -1,0 +1,33 @@
+{
+  "name": "test_line",
+  "label": "SIMULATED pseudo-wells along a line (not measured data)",
+  "n_traces": 50,
+  "trace_step": 16,
+  "length_km": 15.69,
+  "library_n_per_band": 2000,
+  "depth_bands_m": [
+    4550.0,
+    4600.0,
+    4650.0,
+    4700.0
+  ],
+  "zone_formation": "Plover Formation",
+  "training_wells": [
+    "Kronos-1",
+    "Poseidon-1",
+    "Proteus-1"
+  ],
+  "held_out_wells_excluded": [
+    "Poseidon-2",
+    "Boreas-1"
+  ],
+  "time_depth_wells": [
+    "Kronos-1",
+    "Poseidon-1",
+    "Proteus-1"
+  ],
+  "beta_median": 0.177,
+  "low_support_fraction": 0.88,
+  "fit_corr_median": 0.686,
+  "runtime_s": 12.6
+}

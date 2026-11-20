@@ -1,0 +1,30 @@
+[
+  {
+    "well": "Poseidon-2",
+    "surface_pred_twt_ms": 3119.5,
+    "surface_pred_tvdss_m": 4682.2,
+    "beta": 0.1767766922712326,
+    "ess_min": 517.5,
+    "fit_corr": 0.743,
+    "window_twt_ms": [
+      3060.0,
+      3320.0
+    ],
+    "surface_actual_tvdss_m": 4710.8,
+    "surface_actual_twt_ms": 3104.6
+  },
+  {
+    "well": "Boreas-1",
+    "surface_pred_twt_ms": 3132.5,
+    "surface_pred_tvdss_m": 4708.4,
+    "beta": 0.1767766922712326,
+    "ess_min": 384.7,
+    "fit_corr": 0.89,
+    "window_twt_ms": [
+      3072.0,
+      3332.0
+    ],
+    "surface_actual_tvdss_m": 4882.2,
+    "surface_actual_twt_ms": 3241.6
+  }
+]

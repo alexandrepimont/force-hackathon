@@ -92,6 +92,8 @@ class Prior:
     ar1: float = 0.0                 # correlation of (whitened) property residuals between consecutive layers
     ar1_calibration: dict | None = None
     between_frac: float = 0.0        # share of the property variance that is a per-pseudo-well (well-level) offset
+    cap_mean: np.ndarray | None = None   # (P,) overburden directly above the zone (from the same training wells)
+    cap_chol: np.ndarray | None = None   # (P, P)
 
     def to_dict(self):
         return {"facies": self.facies, "proportions": self.proportions.round(4).tolist(),
@@ -99,17 +101,51 @@ class Prior:
                 "n_blocks": self.n_blocks.tolist(), "ar1_between_layers": round(self.ar1, 3),
                 "ar1_calibration": self.ar1_calibration, "between_well_variance_fraction": round(self.between_frac, 3),
                 "mean_thickness_m": [round(float(t.mean()), 2) if len(t) else None for t in self.thickness],
-                "depth_range_m": self.depth_range.round(0).tolist(), "n_sw_gas": int(len(self.sw_gas))}
+                "depth_range_m": self.depth_range.round(0).tolist(), "n_sw_gas": int(len(self.sw_gas)),
+                "overburden_mean": (dict(zip(PROPS, np.round(self.cap_mean, 3).tolist()))
+                                    if self.cap_mean is not None else None)}
 
 
-def load_training_logs(logs_dir: Path, held_out: list[str]) -> pd.DataFrame:
+def overburden_stats(logs_dir: Path, wells: list[str], zone: str, cap_m: float, block_m: float):
+    """Mean and covariance Cholesky of 1 m blocks in the cap_m metres directly above the zone top of each well."""
+    rows = []
+    for w in wells:
+        fr = pd.read_parquet(logs_dir / f"{w}.parquet")
+        inside = fr["formation"].astype(str).str.startswith(zone)
+        if not inside.any():
+            continue
+        z_top = fr.loc[inside, "tvdss"].min()
+        cap = fr[(fr["tvdss"] >= z_top - cap_m) & (fr["tvdss"] < z_top) & ~fr["flag_bad"].astype(bool)]
+        b = np.floor(cap["tvdss"] / block_m)
+        rows.append(cap.groupby(b)[PROPS].mean().dropna())
+    if not rows:
+        return None, None
+    x = pd.concat(rows).to_numpy()
+    if len(x) < 10:
+        return None, None
+    cov = np.cov(x.T) + np.eye(len(PROPS)) * 1e-9 * np.abs(np.cov(x.T).diagonal()).max()
+    return x.mean(axis=0), np.linalg.cholesky(cov)
+
+
+def load_training_logs(logs_dir: Path, held_out: list[str], tcfg: dict | None = None) -> pd.DataFrame:
+    """Training-well logs. With training.zone_formation_prefix set, only samples inside that formation are kept,
+    so wells without the formation's tops drop out; training.exclude_wells are skipped as well."""
+    tcfg = tcfg or {}
+    skip = set(held_out) | set(tcfg.get("exclude_wells") or [])
     frames = []
     for f in sorted(logs_dir.glob("*.parquet")):
-        if f.stem in held_out:
+        if f.stem in skip:
             continue
         frames.append(pd.read_parquet(f))
     fr = pd.concat(frames, ignore_index=True)
     fr = fr[fr["held_out"].astype(str) != "True"]
+    zone = tcfg.get("zone_formation_prefix")
+    if zone:
+        fr = fr[fr["formation"].astype(str).str.startswith(zone)]
+        if fr.empty:
+            raise ValueError(f"no training samples inside '{zone}'")
+    elif "min_tvdss_m" in tcfg:
+        fr = fr[fr["tvdss"] >= tcfg["min_tvdss_m"]]
     return fr
 
 
@@ -151,8 +187,7 @@ def _block(fr: pd.DataFrame, block_m: float, facies: list[str]) -> pd.DataFrame:
 def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     tcfg = cfg["training"]
     facies = list(tcfg["facies"])
-    fr = load_training_logs(logs_dir, held_out)
-    fr = fr[fr["tvdss"] >= tcfg["min_tvdss_m"]]
+    fr = load_training_logs(logs_dir, held_out, tcfg)
     fr = brine_equivalent(fr, cfg)
     sw_gas = fr.loc[(fr["hc_indicator"] == "gas_indicated") & fr["lithotype"].isin(cfg["fluid"]["gas_facies"]),
                     "sw"].dropna().to_numpy()
@@ -216,7 +251,7 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
         z = d["tvdss"].to_numpy()
         x = d[PROPS].to_numpy()
         depth_range[f] = [z.min(), z.max()]
-        if len(d) >= tcfg["min_samples_trend"] and z.std() > 50:
+        if tcfg.get("depth_trend", True) and len(d) >= tcfg["min_samples_trend"] and z.std() > 50:
             A = np.c_[np.ones_like(z), z - 4500.0]
             coef, *_ = np.linalg.lstsq(A, x, rcond=None)
             a[f], b[f] = coef[0], coef[1]
@@ -243,8 +278,14 @@ def build_prior(logs_dir: Path, held_out: list[str], cfg: dict) -> Prior:
     wm = pd.DataFrame(lay_res, index=lay["well"].to_numpy()).groupby(level=0).mean()
     between = float(np.clip(np.nanmean(wm.var(axis=0, ddof=1).to_numpy()), 0.02, 0.9)) if len(wm) > 2 else 0.2
     props = np.array([sum(t) for t in thickness], dtype=float)
+    cap_mean = cap_chol = None
+    zone = tcfg.get("zone_formation_prefix")
+    if zone and tcfg.get("overburden_m", 0) > 0:
+        cap_mean, cap_chol = overburden_stats(logs_dir, sorted(fr["well"].unique()), zone, tcfg["overburden_m"],
+                                              tcfg["block_m"])
     return Prior(facies, props / props.sum(), trans, [np.array(t) for t in thickness], a, b, chol, depth_range,
-                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks, ar1, between_frac=between)
+                 sw_gas, sorted(fr["well"].unique().tolist()), n_blocks, ar1, between_frac=between,
+                 cap_mean=cap_mean, cap_chol=cap_chol)
 
 
 # ----------------------------------------------------------------------------------------- simulation
@@ -255,7 +296,7 @@ def calibrate_ar1(prior: Prior, cfg: dict, calib: dict, ties_dir: Path, held_out
     The per-facies property distributions are unchanged; only how strongly neighbouring layers differ."""
     target = []
     for f in sorted(ties_dir.glob("*.npz")):
-        if f.stem in held_out:
+        if f.stem in held_out or f.stem not in prior.wells:
             continue
         d = np.load(f)
         m = d["win_after"]
@@ -327,11 +368,38 @@ class LayerSim:
         self.u = rng.standard_normal((n, len(PROPS)))     # per-pseudo-well offset (well-level variability)
         self.cdf = np.cumsum(prior.transitions, axis=1)
         self.lay = {k: np.empty((n, 0)) for k in LAYER_KEYS}
+        # overburden: one layer from the start down to the zone top, drawn from the logs just above the zone
+        self.z_zone_top = z_window[0]
+        self.cap_pending = prior.cap_mean is not None
+
+    def _cap_layer(self) -> dict:
+        prior, rng, n = self.prior, self.rng, self.n
+        h = np.maximum(self.z_zone_top - self.cum_z, 0.0)
+        x = prior.cap_mean + rng.standard_normal((n, len(PROPS))) @ prior.cap_chol.T
+        for k, p in enumerate(PROPS):
+            x[:, k] = np.clip(x[:, k], *CLIP[p])
+        x[:, 3] = np.minimum(x[:, 3], x[:, 2] / 1.4)
+        phi, vsh, vp, vs, rho, gr = x.T
+        shale = prior.facies.index("shale") if "shale" in prior.facies else 0
+        vals = [np.full(n, shale), self.cum_t.copy(), self.cum_z.copy(), h, phi, vsh, vp, vs, rho, gr, np.ones(n),
+                np.zeros(n, bool)]
+        out = {}
+        for k, v in zip(LAYER_KEYS, vals):
+            v = np.asarray(v, dtype=float).copy()
+            v[h <= 0.05] = np.nan
+            out[k] = v
+        self.cum_t = self.cum_t + 2 * h / vp
+        self.cum_z = self.cum_z + h
+        return out
 
     def extend(self, t_end: float):
         prior, rng, n = self.prior, self.rng, self.n
         a1 = prior.ar1
         new = {k: [] for k in LAYER_KEYS}
+        if self.cap_pending:
+            self.cap_pending = False
+            for k, v in self._cap_layer().items():
+                new[k].append(v)
         while True:
             active = self.cum_t < t_end
             if not active.any():
@@ -830,13 +898,15 @@ def load_configs(root: Path) -> tuple[dict, dict, dict]:
     return cfg, calib, petro
 
 
-def location_td(root: Path, x: float, y: float, held_out: list[str]) -> tuple[np.ndarray, np.ndarray, str, float]:
-    """Time-depth of the nearest training well with a final tied time-depth curve (TWT s, TVDSS m)."""
+def location_td(root: Path, x: float, y: float, held_out: list[str],
+                allowed: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, str, float]:
+    """Time-depth of the nearest training well with a final tied time-depth curve (TWT s, TVDSS m).
+    With allowed given, only those wells (the wells in the prior) are considered."""
     wells = pd.read_csv(root / "data" / "poseidon" / "dashboard" / "wells.csv")
     best = None
     for r in wells.itertuples():
         f = root / "data" / "interim" / "poseidon_td" / f"{r.WELL_ID}.csv"
-        if r.WELL_ID in held_out or not f.exists():
+        if r.WELL_ID in held_out or not f.exists() or (allowed is not None and r.WELL_ID not in allowed):
             continue
         td = pd.read_csv(f)
         if "twt_final_ms" not in td or td["twt_final_ms"].notna().sum() < 10:
@@ -877,7 +947,7 @@ def run_at_location(root: Path, il: int, xl: int, t0_ms: float, t1_ms: float, *,
     if not (g["samples"][0] + cfg["pad_ms"] <= t0_ms < t1_ms <= g["samples"][-1] - cfg["pad_ms"]):
         raise ValueError("window must lie inside the seismic time range (minus the modelling pad)")
     prior = prior or prepare_prior(root, cfg, calib, held_out)
-    td_t, td_z, td_well, td_km = location_td(root, x, y, held_out)
+    td_t, td_z, td_well, td_km = location_td(root, x, y, held_out, prior.wells)
     t_seis, obs = well_traces(cache, list(calib["stacks"]), il, xl, tie_cfg["trace_bundle"])
     runner = run_smc if cfg.get("method", "smc") == "smc" else run_simulation
     res = runner(prior=prior, cfg=cfg, calib=calib, t_seis_s=t_seis, obs=obs, t_top_s=t0_ms / 1000,
