@@ -1,5 +1,37 @@
 # force-hackathon
 
+## Poseidon: pseudo-wells that listen to the seismic
+
+**[▶ Open the interactive presentation](https://raw.githack.com/alexandrepimont/force-hackathon/main/docs/presentation_short/index.html)** · source: [docs/presentation_short/](docs/presentation_short/index.html)
+
+![Poseidon far-angle seismic cube with the wells](docs/presentation_short/hero_cube.png)
+
+### 1 · Workflow: from wells to probabilities in six steps
+
+Tie the wells → learn the Plover rock → simulate 20 000 pseudo-wells → model near/mid/far → weigh them against the
+real seismic → repeat at 4 275 traces for 3D.
+
+![Workflow: wells, seismic tie, rock statistics, pseudo-wells, synthetic AVO, probabilities](docs/presentation_short/workflow.png)
+
+### 2 · Results: blind well Poseidon-2 (simulated)
+
+![Poseidon-2 blind test](docs/presentation_short/result_blind1d.png)
+
+| Facies | Porosity | Seismic |
+|---|---|---|
+| **94 %** of samples get the right facies class (68 % at Boreas-1) | **86 %** of the real porosity lies inside P10–P90 (95 % at Boreas-1) | **r ≈ 0.74** between simulated and real near/mid/far traces |
+
+### 3 · Results: 3D on a 300 m grid (simulated)
+
+![Sand probability, P(gas given sand) and porosity maps](docs/presentation_short/result_maps3.png)
+
+| Sand | Gas | Trust |
+|---|---|---|
+| SW–NE corridor through Poseidon-2 and Boreas-1: P(sand) 0.35–0.37 vs 0.29 at the edges | P(gas \| sand) is highest in the same corridor (0.76 vs 0.69) | Median seismic fit 0.78; about a quarter of the traces are weakly supported |
+
+Pseudo-wells and maps are simulated, not measured data. Data: Poseidon 3D seismic (TGS, CC BY 4.0) and Geoscience
+Australia well data (CC BY 3.0 AU).
+
 ## Dashboard
 
 Run the local explorer on the real Poseidon wells:
