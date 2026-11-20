@@ -1,0 +1,123 @@
+{
+  "name": "grid3d",
+  "label": "SIMULATED 3D pseudo-well grid (not measured data)",
+  "method": "shared library per depth band + localised importance weighting per trace; P-field realizations",
+  "n_traces": 4275,
+  "grid_shape": [
+    75,
+    57
+  ],
+  "il_step": 16,
+  "xl_step": 24,
+  "node_spacing_m": [
+    300.0,
+    300.0
+  ],
+  "inline_range": [
+    2370,
+    3554
+  ],
+  "crossline_range": [
+    1352,
+    2696
+  ],
+  "window_rel_ms": [
+    -60.0,
+    200.0
+  ],
+  "library_n_per_band": 5000,
+  "depth_bands_m": [
+    4550.0,
+    4600.0,
+    4650.0,
+    4700.0,
+    4750.0,
+    4800.0,
+    4850.0,
+    4900.0,
+    4950.0,
+    5000.0
+  ],
+  "surface": {
+    "points": [
+      {
+        "well": "Proteus-1",
+        "x": 428152.83,
+        "y": 8481148.02,
+        "twt_ms": 3210.3,
+        "tvdss_m": 4898.2,
+        "v_int_m_s": 4156.0,
+        "surface": "Plover Formation"
+      },
+      {
+        "well": "Kronos-1",
+        "x": 412599.26,
+        "y": 8485490.73,
+        "twt_ms": 3062.7,
+        "tvdss_m": 4563.2,
+        "v_int_m_s": 4259.0,
+        "surface": "Plover Formation (Top Volcanics)"
+      },
+      {
+        "well": "Poseidon-1",
+        "x": 425055.47,
+        "y": 8493875.26,
+        "twt_ms": 3121.6,
+        "tvdss_m": 4676.8,
+        "v_int_m_s": 3646.0,
+        "surface": "Plover Formation (Top Volcanics)"
+      }
+    ],
+    "idw_power": 2.0,
+    "v_int_m_s": 4020.3333333333335,
+    "surface_prefix": "Plover Formation"
+  },
+  "training_wells": [
+    "Kronos-1",
+    "Pharos-1",
+    "Poseidon-1",
+    "Poseidon-North-1",
+    "Proteus-1",
+    "Torosa-1"
+  ],
+  "held_out_wells_excluded": [
+    "Poseidon-2",
+    "Boreas-1"
+  ],
+  "beta_median": 0.5,
+  "low_support_fraction": 0.244,
+  "ess_min_median": 401.9,
+  "fit_corr_median": 0.78,
+  "runtime_s": 506.0,
+  "config": {
+    "grid": {
+      "il_step": 16,
+      "xl_step": 24,
+      "margin_traces": 40,
+      "bundle": 3
+    },
+    "horizon": {
+      "surface_prefix": "Plover Formation",
+      "idw_power": 2.0
+    },
+    "window": {
+      "above_ms": 60,
+      "below_ms": 200
+    },
+    "library": {
+      "n": 5000,
+      "depth_band_m": 50,
+      "seed": 21
+    },
+    "trace_batch": 24,
+    "pfield": {
+      "n_realizations": 3,
+      "range_lateral_m": 1500,
+      "range_vertical_ms": 16,
+      "seed": 5
+    },
+    "support": {
+      "min_beta": 0.3
+    }
+  }
+}

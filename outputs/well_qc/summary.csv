@@ -1,0 +1,9 @@
+well,tvdss_max_error_m,n_tops,coverage_gr,coverage_rt,coverage_rho,coverage_nphi,coverage_dtc,coverage_dts,coverage_cali,flagged_fraction_zone,gr_clean,gr_shale,reservoir_top_md,reservoir_base_md,gross_m,net_sand_m,net_to_gross,mean_phi_net,mean_sw_net,gas_indicated_m,vs_measured_fraction_res,flagged_fraction_res,note,held_out
+Boreas-1,4.1,1,0.91,0.88,0.7,0.7,0.83,0.25,0.71,0.024,10.3,92.3,4904.0,5210.0,302.0,115.5,0.38,0.119,0.4,68.5,0.92,0.086,,True
+Kronos-1,6.7,14,0.93,0.98,0.67,0.66,0.33,0.33,0.67,0.0,11.3,97.6,4776.0,5075.0,299.0,40.5,0.14,0.112,0.21,14.0,1.0,0.0,,False
+Pharos-1,0.9,0,0.99,0.98,0.69,0.7,0.67,0.65,0.0,0.002,17.8,166.0,,5220.3,,,,,,,,,no reservoir top available: reservoir statistics not computed,False
+Poseidon-1,15.3,14,0.71,0.94,0.39,0.41,0.36,0.36,0.4,0.011,16.7,164.1,4798.4,5079.0,280.5,132.0,0.47,0.113,0.24,100.5,0.63,0.016,,False
+Poseidon-2,2.5,12,1.0,0.99,0.66,0.69,0.97,0.35,0.68,0.005,18.3,119.4,4732.6,5356.0,618.5,51.5,0.08,0.121,0.41,13.5,0.98,0.01,,True
+Poseidon-North-1,2.2,0,1.0,1.0,0.65,0.66,0.9,0.82,0.83,0.007,27.9,155.5,,5287.5,,,,,,,,,no reservoir top available: reservoir statistics not computed,False
+Proteus-1,4.3,1,0.95,0.75,0.19,0.2,0.83,0.09,0.19,0.0,22.3,136.2,4920.0,5249.7,330.0,80.0,0.24,0.111,0.24,66.0,0.45,0.002,,False
+Torosa-1,3.6,9,1.0,1.0,0.94,0.98,0.98,0.47,0.99,0.004,39.5,134.7,4253.0,4444.0,191.0,58.5,0.31,0.13,0.27,35.0,0.87,0.0,,False

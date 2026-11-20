@@ -233,3 +233,191 @@ def is_synthetic(frame: pd.DataFrame, manifest: dict[str, Any]) -> bool:
             values.map(lambda value: str(value).strip().lower() in {"true", "1", "yes", "y"}).any()
         )
     return False
+
+
+SEISMIC_STACKS = ("near", "mid", "far")
+
+
+def find_seismic_stacks(directory: Path) -> dict[str, Path]:
+    """Find near/mid/far SEG-Y stacks in the folder, its seismic/ subfolder or a sibling seismic/ folder."""
+    root = directory.expanduser().resolve()
+    for folder in (root / "seismic", root.parent / "seismic", root):
+        if not folder.is_dir():
+            continue
+        found = {}
+        for stack in SEISMIC_STACKS:
+            matches = sorted(
+                path
+                for path in folder.iterdir()
+                if path.is_file()
+                and path.suffix.lower() in {".segy", ".sgy"}
+                and stack in path.stem.lower()
+            )
+            if matches:
+                found[stack] = matches[0]
+        if found:
+            return found
+    return {}
+
+
+def _cache_paths(segy_path: Path) -> tuple[Path, Path, Path]:
+    cache = segy_path.parent / "cache"
+    return (cache / f"{segy_path.stem}.f16.npy", cache / f"{segy_path.stem}.geometry.npz",
+            cache / f"{segy_path.stem}.timeslices.f16.npy")
+
+
+def build_seismic_cache(segy_path: Path, iline: int = 189, xline: int = 193, block: int = 64) -> Path:
+    """Convert an inline-sorted regular 3D SEG-Y into a float16 (n_il, n_xl, ns) .npy plus geometry.
+
+    SEG-Y is stored trace by trace, so time slices are very slow to read; the cache makes every view fast.
+    Amplitudes are divided by a robust scale (kept in the geometry file) so they fit float16.
+    """
+    import segyio
+
+    data_path, geometry_path, slices_path = _cache_paths(segy_path)
+    with segyio.open(str(segy_path), iline=iline, xline=xline) as f:
+        if f.sorting != segyio.TraceSortingFormat.INLINE_SORTING:
+            raise ValueError("Only inline-sorted SEG-Y is supported for the dashboard cache.")
+        ilines, xlines = np.asarray(f.ilines), np.asarray(f.xlines)
+        samples = np.asarray(f.samples, dtype=float)
+        n_il, n_xl, ns = len(ilines), len(xlines), len(samples)
+        if f.tracecount != n_il * n_xl:
+            raise ValueError("SEG-Y grid is not complete (missing traces).")
+        fmt = int(f.bin[segyio.BinField.Format])
+        ext_headers = int(f.ext_headers)
+        sample_trace = f.trace.raw[: min(f.tracecount, 20000)]
+        scale = float(np.percentile(np.abs(sample_trace), 99.9)) or 1.0
+
+    offset = 3600 + 3200 * ext_headers
+    if fmt == 5:
+        trace_dtype = np.dtype([("header", "V240"), ("data", ">f4", (ns,))])
+        raw = np.memmap(segy_path, dtype=trace_dtype, mode="r", offset=offset, shape=(n_il * n_xl,))
+        header_dtype = np.dtype({"names": ["scalar", "x", "y"], "formats": [">i2", ">i4", ">i4"],
+                                 "offsets": [70, 180, 184], "itemsize": 240})
+        headers = raw["header"].view(header_dtype)
+    else:
+        raw, headers = None, None
+
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    out = np.lib.format.open_memmap(data_path, mode="w+", dtype=np.float16, shape=(n_il, n_xl, ns))
+    out_t = np.lib.format.open_memmap(slices_path, mode="w+", dtype=np.float16, shape=(ns, n_il, n_xl))
+    cdp_x = np.full((n_il, n_xl), np.nan)
+    cdp_y = cdp_x.copy()
+    with segyio.open(str(segy_path), iline=iline, xline=xline) as f:
+        f.mmap()
+        for start in range(0, n_il, block):
+            stop = min(start + block, n_il)
+            traces = slice(start * n_xl, stop * n_xl)
+            if raw is not None:
+                values = np.asarray(raw["data"][traces], dtype=np.float32)
+                h = headers[traces]
+                scalar, x, y = h["scalar"].astype(float), h["x"].astype(float), h["y"].astype(float)
+            else:
+                values = np.asarray(f.trace.raw[traces.start:traces.stop], dtype=np.float32)
+                scalar = f.attributes(segyio.TraceField.SourceGroupScalar)[traces.start:traces.stop].astype(float)
+                x = f.attributes(segyio.TraceField.CDP_X)[traces.start:traces.stop].astype(float)
+                y = f.attributes(segyio.TraceField.CDP_Y)[traces.start:traces.stop].astype(float)
+            factor = np.where(scalar < 0, 1.0 / np.abs(np.where(scalar == 0, 1, scalar)),
+                              np.where(scalar == 0, 1.0, scalar))
+            scaled = (values / scale).reshape(stop - start, n_xl, ns).astype(np.float16)
+            out[start:stop] = scaled
+            out_t[:, start:stop, :] = scaled.transpose(2, 0, 1)
+            cdp_x[start:stop] = (x * factor).reshape(stop - start, n_xl)
+            cdp_y[start:stop] = (y * factor).reshape(stop - start, n_xl)
+    out.flush()
+    out_t.flush()
+    del out, out_t
+    np.savez(geometry_path, ilines=ilines, xlines=xlines, samples=samples, cdp_x=cdp_x, cdp_y=cdp_y,
+             scale=scale, source_mtime_ns=segy_path.stat().st_mtime_ns)
+    return data_path
+
+
+def seismic_cache_ready(segy_path: Path) -> bool:
+    data_path, geometry_path, slices_path = _cache_paths(segy_path)
+    if not all(path.is_file() for path in (data_path, geometry_path, slices_path)):
+        return False
+    with np.load(geometry_path) as geometry:
+        return int(geometry["source_mtime_ns"]) == segy_path.stat().st_mtime_ns
+
+
+def read_seismic_geometry(segy_path: Path) -> dict[str, np.ndarray]:
+    """Axes, CDP X/Y grid and amplitude scale from the dashboard cache of a SEG-Y stack."""
+    with np.load(_cache_paths(segy_path)[1]) as geometry:
+        return {key: geometry[key].copy() for key in geometry.files}
+
+
+def read_seismic_section(segy_path: Path, kind: str, value: float) -> np.ndarray:
+    """Inline (n_xl, ns), crossline (n_il, ns) or time slice (n_il, n_xl) from the cache, in SEG-Y units."""
+    data_path, _, slices_path = _cache_paths(segy_path)
+    geometry = read_seismic_geometry(segy_path)
+    if kind == "inline":
+        section = np.load(data_path, mmap_mode="r")[int(np.searchsorted(geometry["ilines"], value))]
+    elif kind == "crossline":
+        section = np.load(data_path, mmap_mode="r")[:, int(np.searchsorted(geometry["xlines"], value))]
+    elif kind == "time":
+        section = np.load(slices_path, mmap_mode="r")[int(np.argmin(np.abs(geometry["samples"] - value)))]
+    else:
+        raise ValueError(f"Unsupported section kind: {kind}")
+    return np.asarray(section, dtype=np.float32) * float(geometry["scale"])
+
+
+def read_seismic_traces(segy_path: Path, i_idx: np.ndarray, j_idx: np.ndarray) -> np.ndarray:
+    """Traces (n, ns) at grid indices (i_idx, j_idx) from the cache, in SEG-Y units."""
+    data_path = _cache_paths(segy_path)[0]
+    geometry = read_seismic_geometry(segy_path)
+    cube = np.load(data_path, mmap_mode="r")
+    order = np.lexsort((j_idx, i_idx))
+    traces = np.empty((len(i_idx), cube.shape[2]), dtype=np.float32)
+    traces[order] = np.asarray(cube[i_idx[order], j_idx[order]], dtype=np.float32)
+    return traces * float(geometry["scale"])
+
+
+def traverse_indices(points_ilxl: list[tuple[float, float]], ilines: np.ndarray, xlines: np.ndarray,
+                     geometry: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Grid indices along straight segments between (inline, crossline) points, one sample per trace step.
+
+    Returns i/j indices, inline/crossline numbers, distance along the path (m) and the index of each vertex.
+    """
+    pts = [(float(np.interp(il, ilines, np.arange(len(ilines)))), float(np.interp(xl, xlines, np.arange(len(xlines)))))
+           for il, xl in points_ilxl]
+    ii, jj, vertex = [], [], [0]
+    for (i0, j0), (i1, j1) in zip(pts[:-1], pts[1:]):
+        n = int(max(abs(i1 - i0), abs(j1 - j0))) + 1
+        seg_i, seg_j = np.linspace(i0, i1, n), np.linspace(j0, j1, n)
+        if ii:
+            seg_i, seg_j = seg_i[1:], seg_j[1:]
+        ii.extend(seg_i)
+        jj.extend(seg_j)
+        vertex.append(len(ii) - 1)
+    i_idx = np.clip(np.rint(ii).astype(int), 0, len(ilines) - 1)
+    j_idx = np.clip(np.rint(jj).astype(int), 0, len(xlines) - 1)
+    x, y = geometry["cdp_x"][i_idx, j_idx], geometry["cdp_y"][i_idx, j_idx]
+    distance = np.r_[0, np.cumsum(np.hypot(np.diff(x), np.diff(y)))]
+    return {"i": i_idx, "j": j_idx, "inline": ilines[i_idx], "crossline": xlines[j_idx], "x": x, "y": y,
+            "distance_m": distance, "vertex": np.asarray(vertex)}
+
+
+def survey_outline(geometry: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """X, Y of the cube's four corners (closed polygon)."""
+    x, y = geometry["cdp_x"], geometry["cdp_y"]
+    corners = [(0, 0), (0, -1), (-1, -1), (-1, 0), (0, 0)]
+    return np.array([x[i, j] for i, j in corners]), np.array([y[i, j] for i, j in corners])
+
+
+def wells_on_grid(geometry: dict[str, np.ndarray], wells: pd.DataFrame) -> pd.DataFrame:
+    """Nearest inline/crossline for each well (X_M, Y_M); wells outside the grid get NaN."""
+    x, y = geometry["cdp_x"], geometry["cdp_y"]
+    valid = np.isfinite(x) & np.isfinite(y)
+    rows = []
+    spacing = np.nanmedian(np.hypot(np.diff(x, axis=1), np.diff(y, axis=1)))
+    for _, well in wells.iterrows():
+        distance = np.where(valid, np.hypot(x - well["X_M"], y - well["Y_M"]), np.inf)
+        i, j = np.unravel_index(np.argmin(distance), distance.shape)
+        inside = distance[i, j] <= 2 * spacing
+        rows.append({
+            "WELL_ID": well["WELL_ID"],
+            "INLINE": int(geometry["ilines"][i]) if inside else np.nan,
+            "CROSSLINE": int(geometry["xlines"][j]) if inside else np.nan,
+            "DISTANCE_M": float(distance[i, j]),
+        })
+    return pd.DataFrame(rows)

@@ -1,0 +1,52 @@
+# Petrophysics and well QC parameters for the Poseidon wells (task 02).
+# All interpretation choices live here; scripts/run_well_qc.py reads this file.
+
+zone_of_interest_tvdss: 3500.0      # QC plots, GR normalisation and statistics below this depth (m TVDSS)
+
+# Held-out (blind) wells: excluded from every fitted relation (Vs calibration here; wavelets/scales in task 03).
+held_out_wells: ["Poseidon-2", "Boreas-1"]
+
+bad_hole:
+  bit_sizes_in: [6.0, 8.5, 12.25, 17.5]   # nominal hole size = nearest bit size to the 200 m running median caliper
+  caliper_window_m: 200.0
+  caliper_excess_in: 1.5            # flag where caliper exceeds the inferred nominal hole size by this much
+  rho_valid: [1.8, 3.1]             # g/cc
+  vp_valid: [1400.0, 7000.0]        # m/s
+  vpvs_valid: [1.35, 3.2]
+
+vsh:                                 # linear GR index between per-well percentiles in the zone of interest
+  gr_clean_percentile: 5
+  gr_shale_percentile: 95
+
+porosity:
+  rho_matrix: 2.65                  # quartz sandstone
+  rho_fluid: 1.05                   # mud filtrate / brine in the invaded zone
+  max: 0.40
+  # Neutron-density: average, or sqrt((phiD^2 + phiN^2)/2) where neutron < density porosity (gas effect).
+  # Neutron is in limestone units; no lithology correction applied (documented approximation).
+
+archie:
+  a: 1.0
+  m: 2.0
+  n: 2.0
+  rw: 0.04                          # ohm.m at Plover conditions; ASSUMPTION, refine with water analysis
+
+labels:
+  vsh_shale: 0.5                    # Vsh >= this -> shale
+  nd_separation_shale: 0.12         # or neutron minus density porosity >= this (clay-bound water) -> shale
+  phi_tight: 0.06                   # phi < this (and not shale) -> tight
+  phi_good: 0.12                    # phi >= this -> high-porosity sand, else low-porosity sand
+  volcanic_interval: ["Plover Formation (Top Volcanics)", "Plover Formation (Top Reservoir)"]
+
+# Fluid is NOT labelled from logs (no test/fluid data available). Only an indicator is reported:
+# gas_indicated = Archie Sw below the cut-off AND neutron-density crossover; possible = only one of the two.
+hc_indicator:
+  sw_max: 0.6
+  crossover_min: 0.02               # density porosity minus neutron porosity (v/v)
+
+vs_estimate:
+  method: greenberg_castagna         # brine sand/shale mix by Vsh, bias-corrected on measured Vs in the zone
+
+reservoir:
+  top_surfaces: ["Plover Formation (Top Reservoir)", "Plover Formation"]   # first match wins
+  base_surfaces: ["Nome Formation"]                                         # else log TD

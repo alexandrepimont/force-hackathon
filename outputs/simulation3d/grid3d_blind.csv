@@ -1,0 +1,17 @@
+well,ensemble,property,n_samples,coverage_p10_p90,mae_p50,mae_mean,accuracy_map,mean_p_true_facies
+Poseidon-2,prior,phi,66,0.879,0.0352,,,
+Poseidon-2,prior,vp,66,,,416.1,,
+Poseidon-2,prior,ai,66,,,1151.6,,
+Poseidon-2,prior,facies,66,,,,0.939,0.658
+Poseidon-2,post,phi,66,0.864,0.0377,,,
+Poseidon-2,post,vp,66,,,420.1,,
+Poseidon-2,post,ai,66,,,1159.3,,
+Poseidon-2,post,facies,66,,,,0.939,0.698
+Boreas-1,prior,phi,64,0.969,0.0247,,,
+Boreas-1,prior,vp,66,,,489.5,,
+Boreas-1,prior,ai,64,,,1031.6,,
+Boreas-1,prior,facies,57,,,,0.684,0.502
+Boreas-1,post,phi,64,0.953,0.0222,,,
+Boreas-1,post,vp,66,,,469.1,,
+Boreas-1,post,ai,64,,,946.9,,
+Boreas-1,post,facies,57,,,,0.684,0.493

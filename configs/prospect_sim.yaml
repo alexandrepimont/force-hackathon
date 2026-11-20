@@ -1,0 +1,69 @@
+# 1D Monte Carlo simulation at a prospect location (pseudo-well), conditioned on the near/mid/far AVO signal.
+# Read by src/avo/prospect_sim.py and scripts/run_prospect_sim.py. Held-out wells (configs/petrophysics.yaml)
+# are never used for the prior, the time-depth or any other fitted quantity.
+
+n_realizations: 20000          # plain Monte Carlo draws (prior statistics; posterior if method = localised_is)
+batch_size: 2000
+seed: 7
+pad_ms: 64                     # modelled above/below the window so the wavelet sees the boundaries (not scored)
+
+# Posterior method (chosen on TRAINING wells Kronos-1, Poseidon-1, Proteus-1; blind wells not used):
+#   localised_is - importance weighting with a +/- localisation window (default). Best facies and log scores:
+#                  porosity MAE 0.034 (prior 0.039), Vp MAE 393 m/s (prior 470), P(true facies) 0.48 (prior 0.44)
+#   smc          - sequential Monte Carlo (particle filter): pseudo-wells are grown top-down in segments, weighted
+#                  on the seismic misfit of each new segment, resampled and regrown below. Closer match to the
+#                  seismic (~80 % of samples inside P10-P90 vs ~67 %) but worse logs/facies (it explains weak
+#                  amplitudes with stiffer, more uniform rock), so it is offered as an alternative only.
+method: localised_is
+smc:
+  n_particles: 5000
+  segment_ms: 32               # scored segment length
+  lookahead_ms: 48             # model below the segment so its wavelet sidelobes are represented when scoring
+  ess_target_frac: 0.1         # adaptive tempering per segment keeps at least this fraction effective
+
+training:
+  # Prior only from the reservoir: log samples whose formation (from the supplied tops) starts with this prefix.
+  # Wells without these tops (Pharos-1, Poseidon-North-1) therefore drop out; their logs and time-depth are not used.
+  zone_formation_prefix: "Plover Formation"
+  exclude_wells: [Torosa-1]    # has Plover tops but lies outside the seismic survey
+  depth_trend: false           # Plover spans only a few hundred metres per well: constant per-facies statistics
+  overburden_m: 60             # one layer above the zone top drawn from the logs in this interval above Plover
+                               # (same training wells), so the top-reservoir reflection has the right contrast
+  min_tvdss_m: 3500.0          # only used when zone_formation_prefix is empty
+  block_m: 1.0                 # logs are blocked to this size before facies runs and statistics are computed
+  facies: [shale, sand_high_phi, sand_low_phi, tight, volcanic]   # 'unknown' is not simulated
+  min_samples_trend: 40        # fewer blocks than this -> no depth trend for that facies
+  trend_depth_margin_m: 300.0  # depth trends are not extrapolated more than this outside the training range
+  # Neighbouring layers are correlated (AR(1) on property residuals). The correlation is calibrated so that prior
+  # synthetics match the RMS amplitude of the training wells' own log synthetics (no seismic, no held-out wells).
+  calibrate_layer_correlation: true
+
+fluid:
+  # No fluid labels exist (agent rule). Training sands with hc_indicator == gas_indicated are Gassmann-substituted
+  # to brine using their Archie Sw; all other samples are assumed brine. Gas is then a simulated scenario.
+  gas_facies: [sand_high_phi, sand_low_phi]
+  p_gas_column: 0.5            # prior probability that a gas column is present at the location
+  contact_below_window_frac: 0.5   # gas-water contact drawn uniformly from window top to base + frac * thickness
+  sw_gas_from: gas_indicated_sands  # gas-case Sw drawn from Archie Sw of gas-indicated training sands
+  sw_gas_clip: [0.08, 0.85]
+  kdry_floor_frac: 0.6         # Gassmann: dry bulk modulus >= this * brine-saturated K (consolidated deep rock)
+  # Reservoir conditions -- ASSUMPTIONS (no pressure/temperature data loaded), used for Batzle-Wang fluids.
+  pressure_gradient_mpa_per_m: 0.0102   # hydrostatic
+  seabed_temperature_c: 4.0
+  water_depth_m: 500.0
+  geothermal_gradient_c_per_m: 0.034
+  salinity_ppm: 50000
+  gas_gravity: 0.65
+  minerals: {quartz: [36.6, 45.0, 2.65], clay: [21.0, 7.0, 2.58], calcite: [76.8, 32.0, 2.71]}
+
+likelihood:
+  noise_inflation: 1.0         # multiplies the per-stack residual std from the well tie (configs/calibration.yaml)
+  correlation_length_ms: auto  # auto = 1 / (2 * dominant frequency); log-likelihood is divided by this many samples
+  # Localised importance weighting: the weight of a realization at time t only uses the seismic misfit within
+  # +/- this half-window (about one wavelet). Plain global weighting collapses to a handful of realizations
+  # for windows of a few hundred ms.
+  localization_half_window_ms: 32
+  min_ess_target: 200          # adaptive tempering: likelihood is softened (beta < 1) only if needed to reach this
+  min_ess_warning: 50
+  n_best: 30                   # best globally matching realizations kept as example pseudo-wells
+  n_prior_examples: 200

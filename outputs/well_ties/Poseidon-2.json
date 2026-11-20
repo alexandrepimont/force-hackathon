@@ -1,0 +1,98 @@
+{
+  "well": "Poseidon-2",
+  "held_out": true,
+  "time_depth": {
+    "donor": "Kronos-1",
+    "transferred": true,
+    "distance_km": 9.6,
+    "rejected": [
+      {
+        "donor": "Pharos-1",
+        "distance_km": 13.4,
+        "reason": "further than selected donor"
+      },
+      {
+        "donor": "Torosa-3",
+        "distance_km": 43.1,
+        "reason": "further than selected donor"
+      }
+    ],
+    "compatibility": {
+      "plover_top_target_m": 4710.8,
+      "plover_top_donor_m": 4563.2
+    },
+    "source_meta": {
+      "file": "C:/FORCE Hackathon 2026/force-hackathon/data/poseidon/wells/logs_extra/Kronos-1/CP_Kronos1_Logs_depth.las",
+      "kind": "vsp_adjusted_sonic_owt",
+      "column_index": 1,
+      "depth": "TVD below MSL",
+      "time": "one-way time (s), ADJS",
+      "depth_range_m": [
+        0.0,
+        5282.0316
+      ]
+    }
+  },
+  "trace_selection": "mean of 3x3 traces around il 2856 / xl 2284",
+  "log_conditioning": {
+    "interval_tvdss_m": [
+      4083.7,
+      4680.2
+    ],
+    "interpolated_samples": 10,
+    "vs_estimated_fraction": 0.99
+  },
+  "auto_tie": {
+    "shift_s": -0.017,
+    "stretch": 0.005,
+    "corr": 0.6186723588127054,
+    "tc": 2.9521464311056596,
+    "max_shift_ms": 60
+  },
+  "polarity": "reverse (documented)",
+  "wavelets": {
+    "near": {
+      "freq_hz": 20.0,
+      "phase_deg": -10.0,
+      "mean_corr_training": 0.67
+    },
+    "mid": {
+      "freq_hz": 19.0,
+      "phase_deg": -10.0,
+      "mean_corr_training": 0.661
+    },
+    "far": {
+      "freq_hz": 19.0,
+      "phase_deg": 10.0,
+      "mean_corr_training": 0.571
+    }
+  },
+  "result": {
+    "well": "Poseidon-2",
+    "status": "tied",
+    "held_out": true,
+    "td_source": "Kronos-1",
+    "td_transferred": true,
+    "td_distance_km": 9.6,
+    "inline": 2856,
+    "crossline": 2284,
+    "shift_ms": -17.0,
+    "stretch_pct": 0.5,
+    "max_shift_ms": 60,
+    "window_ms": [
+      2792,
+      3056
+    ],
+    "vs_estimated_fraction": 0.99,
+    "corr_before_near": -0.453,
+    "corr_after_near": 0.666,
+    "corr_before_mid": -0.381,
+    "corr_after_mid": 0.725,
+    "corr_before_far": 0.068,
+    "corr_after_far": 0.517,
+    "corr_before_mean": -0.255,
+    "corr_after_mean": 0.636,
+    "qc_flags": "ok",
+    "needs_review": false
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "well": "Kronos-1",
+  "held_out": false,
+  "time_depth": {
+    "donor": "Kronos-1",
+    "transferred": false,
+    "distance_km": 0.0,
+    "rejected": [],
+    "source_meta": {
+      "file": "C:/FORCE Hackathon 2026/force-hackathon/data/poseidon/wells/logs_extra/Kronos-1/CP_Kronos1_Logs_depth.las",
+      "kind": "vsp_adjusted_sonic_owt",
+      "column_index": 1,
+      "depth": "TVD below MSL",
+      "time": "one-way time (s), ADJS",
+      "depth_range_m": [
+        0.0,
+        5282.0316
+      ]
+    }
+  },
+  "trace_selection": "mean of 3x3 traces around il 2410 / xl 2669",
+  "log_conditioning": {
+    "interval_tvdss_m": [
+      4756.2,
+      5285.2
+    ],
+    "interpolated_samples": 0,
+    "vs_estimated_fraction": 0.0
+  },
+  "auto_tie": {
+    "shift_s": 0.011,
+    "stretch": 0.0,
+    "corr": 0.8303332201144457,
+    "tc": 3.2602056290909815,
+    "max_shift_ms": 20
+  },
+  "polarity": "reverse (documented)",
+  "wavelets": {
+    "near": {
+      "freq_hz": 20.0,
+      "phase_deg": -10.0,
+      "mean_corr_training": 0.67
+    },
+    "mid": {
+      "freq_hz": 19.0,
+      "phase_deg": -10.0,
+      "mean_corr_training": 0.661
+    },
+    "far": {
+      "freq_hz": 19.0,
+      "phase_deg": 10.0,
+      "mean_corr_training": 0.571
+    }
+  },
+  "result": {
+    "well": "Kronos-1",
+    "status": "tied",
+    "held_out": false,
+    "td_source": "Kronos-1",
+    "td_transferred": false,
+    "td_distance_km": 0.0,
+    "inline": 2410,
+    "crossline": 2669,
+    "shift_ms": 11.0,
+    "stretch_pct": 0.0,
+    "max_shift_ms": 20,
+    "window_ms": [
+      3184,
+      3356
+    ],
+    "vs_estimated_fraction": 0.0,
+    "corr_before_near": 0.173,
+    "corr_after_near": 0.842,
+    "corr_before_mid": 0.309,
+    "corr_after_mid": 0.796,
+    "corr_before_far": 0.063,
+    "corr_after_far": 0.815,
+    "corr_before_mean": 0.182,
+    "corr_after_mean": 0.818,
+    "qc_flags": "short tie window (172 ms)",
+    "needs_review": true
+  }
+}

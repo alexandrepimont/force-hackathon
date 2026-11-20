@@ -1,0 +1,76 @@
+# Workflow configuration. These are the pipeline's own assumptions, separate from the synthetic truth.
+seed: 7
+dt_model: 0.001
+
+rock_physics:
+  minerals: {quartz: [36.6, 45.0, 2.65], clay: [21.0, 7.0, 2.58], calcite: [76.8, 32.0, 2.71]}
+  reservoir:                      # Hugin DST-based fluid conditions (15/9-19 SR / 15/9-19 A)
+    pressure_mpa: 30.0
+    temperature_c: 110.0
+    salinity_ppm: 50000
+    oil_api: 29.0                 # ~0.88 g/cm3 stock-tank oil
+    gor: 90.0
+    gas_gravity: 0.74
+  frame: {phic: 0.40, exponent: 1.8}   # used by what-if porosity changes
+
+calibration:
+  freqs: [12, 46, 1]              # start, stop, step (Hz)
+  phases: [-40, 40, 5]            # degrees
+  reference_freq: 25.0
+  max_shift_ms: 8
+  wavelet_length: 0.128
+  g2_min_corr: 0.6
+
+gate_g3: {min_ratio: 1.0, sw_oil: 0.2}
+
+# Prior B: hand-picked Monte Carlo ranges (constitution workflow)
+prior_b:
+  length_m: [500, 700]
+  reservoir_top_frac: [0.3, 0.6]
+  reservoir_thickness: [5, 100]
+  n_beds: [1, 4]
+  sand_phi: [0.08, 0.30]
+  sand_vsh: [0.0, 0.30]
+  shale_phi: [0.08, 0.20]
+  shale_vsh: [0.6, 0.9]
+  interbed_prob: 0.5
+  interbed_thickness: [0.5, 5.0]
+  stringers_per_100m: 0.5
+  stringer_thickness: [0.5, 3.0]
+  tight_phi: [0.02, 0.08]
+  tight_calcite: [0.3, 0.8]
+  p_oil: 0.5
+  sw_oil: [0.1, 0.4]
+  underburden_bed_thickness: [2.0, 20.0]
+  underburden_sand_fraction: 0.4
+  frame_exponent: [1.3, 2.5]
+  phic: 0.40
+
+# Prior C: geology learned from training wells (block resampling + Gassmann fluid relabelling)
+prior_c:
+  overburden_m: [150, 300]
+  underburden_m: [100, 250]
+  thickness_stretch: [0.6, 1.5]
+  p_split: 0.5
+  p_oil: 0.5
+  sw_oil: [0.1, 0.4]
+
+library:
+  n_pseudo_wells: 300
+  freq_jitter: 0.08               # relative
+  phase_jitter: 8.0               # degrees
+  scale_jitter: 0.08              # relative
+  window_half: 6                  # samples either side of the centre sample
+
+model: {max_iter: 200, learning_rate: 0.08, max_leaf_nodes: 31, min_class_samples: 20}
+
+mapping:
+  window_ms: [0, 16]              # below the interpreted Hugin top; must lie inside export.window_ms
+  ood_neighbors: 20               # Local Outlier Factor neighbours
+  ood_library_subsample: 5000
+
+export:
+  window_ms: [-60, 160]           # prediction window relative to the interpreted Hugin top; null outside
+  null_value: -999.25
+  fluid_min_p_sand: 0.5           # fluid probabilities are undefined (null) where P(sand) is below this
+  chunk_traces: 2000              # traces predicted per batch (memory control for large cubes)

@@ -1,0 +1,168 @@
+{
+  "created": "2026-11-19T12:08:21+00:00",
+  "synthetic": true,
+  "null_value": -999.25,
+  "window_ms_relative_to_horizon": [
+    -60,
+    160
+  ],
+  "fluid_min_p_sand": 0.5,
+  "fluid_is_target": true,
+  "class_codes": {
+    "0": "shale",
+    "1": "tight",
+    "2": "brine_sand",
+    "3": "oil_sand"
+  },
+  "template": "data\\synthetic\\seismic\\synthetic_near.segy",
+  "format": "SEG-Y rev1, IEEE float (format 5), time domain",
+  "files": [
+    {
+      "file": "A_litho_p_shale.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "litho_p_shale",
+      "description": "Probability of shale (0-1)."
+    },
+    {
+      "file": "A_litho_p_tight.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "litho_p_tight",
+      "description": "Probability of tight/cemented rock (0-1)."
+    },
+    {
+      "file": "A_litho_p_sand.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "litho_p_sand",
+      "description": "Probability of sand, any fluid (0-1)."
+    },
+    {
+      "file": "A_fluid_p_brine_given_sand.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "fluid_p_brine_given_sand",
+      "description": "Probability of brine given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "A_fluid_p_oil_given_sand.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "fluid_p_oil_given_sand",
+      "description": "Probability of oil given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "A_uncertainty_entropy.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "uncertainty_entropy",
+      "description": "Normalised entropy of the class probabilities: 0 = certain, 1 = uniform."
+    },
+    {
+      "file": "A_most_likely_class.segy",
+      "method": "A",
+      "method_label": "A: intercept-gradient",
+      "product": "most_likely_class",
+      "description": "Most likely class code (see class_codes)."
+    },
+    {
+      "file": "B_litho_p_shale.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "litho_p_shale",
+      "description": "Probability of shale (0-1)."
+    },
+    {
+      "file": "B_litho_p_tight.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "litho_p_tight",
+      "description": "Probability of tight/cemented rock (0-1)."
+    },
+    {
+      "file": "B_litho_p_sand.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "litho_p_sand",
+      "description": "Probability of sand, any fluid (0-1)."
+    },
+    {
+      "file": "B_fluid_p_brine_given_sand.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "fluid_p_brine_given_sand",
+      "description": "Probability of brine given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "B_fluid_p_oil_given_sand.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "fluid_p_oil_given_sand",
+      "description": "Probability of oil given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "B_uncertainty_entropy.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "uncertainty_entropy",
+      "description": "Normalised entropy of the class probabilities: 0 = certain, 1 = uniform."
+    },
+    {
+      "file": "B_most_likely_class.segy",
+      "method": "B",
+      "method_label": "B: hand-picked prior",
+      "product": "most_likely_class",
+      "description": "Most likely class code (see class_codes)."
+    },
+    {
+      "file": "C_litho_p_shale.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "litho_p_shale",
+      "description": "Probability of shale (0-1)."
+    },
+    {
+      "file": "C_litho_p_tight.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "litho_p_tight",
+      "description": "Probability of tight/cemented rock (0-1)."
+    },
+    {
+      "file": "C_litho_p_sand.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "litho_p_sand",
+      "description": "Probability of sand, any fluid (0-1)."
+    },
+    {
+      "file": "C_fluid_p_brine_given_sand.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "fluid_p_brine_given_sand",
+      "description": "Probability of brine given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "C_fluid_p_oil_given_sand.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "fluid_p_oil_given_sand",
+      "description": "Probability of oil given sand (0-1). Null where P(sand) < threshold."
+    },
+    {
+      "file": "C_uncertainty_entropy.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "uncertainty_entropy",
+      "description": "Normalised entropy of the class probabilities: 0 = certain, 1 = uniform."
+    },
+    {
+      "file": "C_most_likely_class.segy",
+      "method": "C",
+      "method_label": "C: learned prior",
+      "product": "most_likely_class",
+      "description": "Most likely class code (see class_codes)."
+    }
+  ]
+}

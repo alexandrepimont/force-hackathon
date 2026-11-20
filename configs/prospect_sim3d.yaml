@@ -1,0 +1,38 @@
+# 3D extension of the 1D pseudo-well simulation (src/avo/prospect_sim3d.py, scripts/run_prospect_sim3d.py).
+# Same prior, forward model and localised importance weighting as configs/prospect_sim.yaml; the pseudo-wells are
+# simulated once per depth band (a shared library) and re-weighted at every trace of a decimated grid.
+# Held-out wells (configs/petrophysics.yaml) are not used for the prior, the horizon or the time-depth.
+
+grid:
+  il_step: 16                  # every 16th inline  (16 x 18.75 m = 300 m)
+  xl_step: 24                  # every 24th crossline (24 x 12.5 m = 300 m)
+  margin_traces: 40            # area = bounding box of the wells inside the survey, plus this margin (in traces)
+  bundle: 3                    # mean of bundle x bundle traces around each node (same as the 1D runs)
+
+horizon:
+  # Target surface interpolated from the first pick of this formation in each TRAINING well with a tied
+  # time-depth curve: least-squares plane in x/y (+ inverse-distance residuals if more than 3 wells).
+  surface_prefix: "Plover Formation"
+  idw_power: 2.0
+
+window:                        # scored window relative to the interpolated surface (TWT ms); the overburden layer
+  above_ms: 0                  # of the prior ends at the window top, so the window starts at the surface
+  below_ms: 200
+
+library:
+  n: 5000                      # pseudo-wells per depth band (kept small; ESS is checked per trace)
+  depth_band_m: 50             # one library per band; traces are dithered between the two nearest bands
+  seed: 21
+
+trace_batch: 24                # traces weighted together (memory ~ batch x n x samples x 4 bytes x a few)
+
+pfield:
+  # Laterally consistent realizations: a spatially correlated uniform field selects a pseudo-well (ordered by
+  # porosity) from each trace's local posterior, so neighbouring traces pick similar members.
+  n_realizations: 3
+  range_lateral_m: 1500
+  range_vertical_ms: 16
+  seed: 5
+
+support:
+  min_beta: 0.3                # traces whose likelihood had to be softened below this are flagged low support

@@ -1,0 +1,14 @@
+{
+  "method": "Greenberg-Castagna (1992) x bias factor",
+  "bias_factor": 0.9688286916094739,
+  "relative_std": 0.0807368358349245,
+  "n_samples": 8554,
+  "training_wells": [
+    "Kronos-1",
+    "Pharos-1",
+    "Poseidon-1",
+    "Poseidon-North-1",
+    "Proteus-1",
+    "Torosa-1"
+  ]
+}
