@@ -1866,6 +1866,7 @@ def page_simulation():
     else:
         _simulate_panel(route, dist, vertices, mode, il, xl, point_d, t0, t1, top_line, base_line, pos, held)
     _sim_line_results(pos, held)
+    _sim_point_results(pos)
 
 
 def _simulate_panel(route, dist, vertices, mode, il, xl, point_d, t0, t1, top_line, base_line, pos, held):
@@ -1928,8 +1929,9 @@ def _simulate_panel(route, dist, vertices, mode, il, xl, point_d, t0, t1, top_li
             except ValueError as exc:
                 st.error(str(exc))
             bar.empty()
-    _sim_line_results(pos, held)
 
+
+def _sim_point_results(pos):
     runs = sim_runs()
     if not runs:
         st.caption("No simulations yet.")
